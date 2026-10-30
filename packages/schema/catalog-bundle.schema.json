@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/yourname/tiku-studio/packages/schema/catalog-bundle.schema.json",
+  "title": "目录级拆解产物（册 → 单元 → 课时/页）",
+  "description": "课本、教辅的目录级拆解结果。课本是整个系统的『纲』：其单元的 knowledge_points 是判定题目是否超纲的标尺。",
+  "type": "object",
+  "required": ["book", "units"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "book": { "$ref": "#/$defs/book" },
+    "units": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/unit" }
+    }
+  },
+  "$defs": {
+    "book": {
+      "type": "object",
+      "required": ["role", "subject", "grade", "semester", "publisher", "edition_year", "title"],
+      "additionalProperties": false,
+      "properties": {
+        "role": { "enum": ["textbook", "workbook", "paper_set", "self_made"] },
+        "subject": { "type": "string", "minLength": 1 },
+        "grade": { "type": "integer", "minimum": 1, "maximum": 12 },
+        "semester": { "enum": ["上册", "下册", "全一册"] },
+        "publisher": { "type": "string", "minLength": 1 },
+        "edition_year": { "type": "integer" },
+        "title": { "type": "string", "minLength": 1 },
+        "source_file": { "type": "string" },
+        "description": { "type": "string" }
+      }
+    },
+    "unit": {
+      "type": "object",
+      "required": ["seq", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "seq": { "type": "integer", "minimum": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "knowledge_points": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "lessons": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["seq", "name"],
+            "additionalProperties": false,
+            "properties": {
+              "seq": { "type": "integer", "minimum": 1 },
+              "name": { "type": "string", "minLength": 1 },
+              "pages": {
+                "type": "string",
+                "description": "可选：对应课本印刷页码，如 14~16"
+              }
+            }
+          }
+        },
+        "pages": {
+          "type": "array",
+          "description": "扫描页/试卷页索引（文件级，不放数据库外的绝对路径）",
+          "items": {
+            "type": "object",
+            "required": ["path"],
+            "additionalProperties": false,
+            "properties": {
+              "path": { "type": "string" },
+              "page_no": { "type": "integer" },
+              "kind": { "enum": ["scan", "textbook", "exam", "answer"] },
+              "note": { "type": "string" },
+              "lesson_seq": { "type": "integer" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

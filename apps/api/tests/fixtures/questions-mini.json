@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "book": {
+    "role": "self_made",
+    "subject": "数学",
+    "grade": 1,
+    "semester": "上册",
+    "publisher": "自制",
+    "edition_year": 2026,
+    "title": "自编卷·数学一年级上（第一单元）",
+    "source_file": "自编卷/数学第一单元阶段自测卷.pdf",
+    "description": "原创种子题库：范围 5 以内数的认识和加减法（人教版 2024）。满分 100 分，限时 60 分钟。"
+  },
+  "source_textbook_title": "人教版数学一年级上册（2024）",
+  "questions": [
+    {
+      "stem": "连一连：把左边的图形个数和右边的数连起来。\n★\n●●●●●\n▲▲▲\n■■■■\n●●\n右边：3、1、5、2、4",
+      "answer": "★—1，●●●●●—5，▲▲▲—3，■■■■—4，●●—2",
+      "q_type": "连线",
+      "difficulty": 1,
+      "knowledge_points": [
+        "数物对应与写数"
+      ],
+      "source_page": "一、1",
+      "status": "confirmed",
+      "analysis": "逐一数出每组图形的个数再连线，注意一一对应。"
+    },
+    {
+      "stem": "数一数，在日字格里写数：○○○○\n（　）",
+      "answer": "4",
+      "q_type": "填空",
+      "difficulty": 1,
+      "knowledge_points": [
+        "数物对应与写数"
+      ],
+      "source_page": "一、2①",
+      "status": "confirmed"
+    },
+    {
+      "stem": "数一数，在日字格里写数：★★★\n（　）",
+      "answer": "3",
+      "q_type": "填空",
+      "difficulty": 1,
+      "knowledge_points": [
+        "数物对应与写数"
+      ],
+      "source_page": "一、2②",
+      "status": "confirmed"
+    },
+    {
+      "stem": "数一数，在日字格里写数：▲▲▲▲▲\n（　）",
+      "answer": "5",
+      "q_type": "填空",
+      "difficulty": 1,
+      "knowledge_points": [
+        "数物对应与写数"
+      ],
+      "source_page": "一、2③",
+      "status": "confirmed"
+    },
+    {
+      "stem": "按顺序填数：1、2、（　）、4、（　）",
+      "answer": "3、5",
+      "q_type": "填空",
+      "difficulty": 1,
+      "knowledge_points": [
+        "数序"
+      ],
+      "source_page": "二、1",
+      "status": "confirmed"
+    },
+    {
+      "stem": "按顺序填数（倒着数）：5、（　）、3、（　）、1",
+      "answer": "4、2",
+      "q_type": "填空",
+      "difficulty": 1,
+      "knowledge_points": [
+        "数序"
+      ],
+      "source_page": "二、1",
+      "status": "confirmed"
+    },
+    {
+      "stem": "阳台上挂着一排气球（每个 ○ 表示 1 个气球）：○　○　○　○　○\n(1) 一共有（　）个气球。(2) 从左边数，把第 2 个气球涂色。(3) 涂色的气球从右边数排第（　）个。",
+      "answer": "(1) 5 个；(2) 涂从左数第 2 个；(3) 第 4 个",
+      "q_type": "应用",
+      "difficulty": 2,
+      "knowledge_points": [
+        "几和第几"
+      ],
+      "source_page": "二、2",
+      "status": "confirmed",
+      "analysis": "区分『几个』和『第几个』：从左数和从右数的方向相反，序数不同。"
+    },
+    {
+      "stem": "在 ○ 里填上 ＞、＜ 或 ＝：4 ○ 5",
+      "answer": "＜",
+      "q_type": "填空",
+      "difficulty": 1,
+      "knowledge_points": [
+        "比大小（＞＜＝）"
+      ],
+      "source_page": "三、1",
+      "status": "confirmed"
+    }
+  ]
+}

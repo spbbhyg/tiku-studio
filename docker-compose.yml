@@ -1,0 +1,11 @@
+services:
+  tiku:
+    build: .
+    container_name: tiku-studio
+    ports:
+      - "8100:8100"
+    volumes:
+      - ./data:/app/data        # 数据库 / 收件箱 / 题图库 全部持久化
+    environment:
+      - TZ=Asia/Shanghai
+    restart: unless-stopped

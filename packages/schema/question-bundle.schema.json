@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/yourname/tiku-studio/packages/schema/question-bundle.schema.json",
+  "title": "题目级拆解产物（册 + 题目列表）",
+  "description": "试卷/教辅的题目级拆解结果。知识点命名必须与所属教材纲（catalog-bundle）中的 knowledge_points 一致，对纲校验才能通过；超出教材范围的提优题请显式给出 scope_status=extension 并写明 scope_reason。",
+  "type": "object",
+  "required": ["book", "questions"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "book": { "$ref": "catalog-bundle.schema.json#/$defs/book" },
+    "source_textbook_title": {
+      "type": "string",
+      "description": "本册挂靠的教材纲标题（role=textbook 的书名）。缺省时按 年级+科目+学期 自动匹配。"
+    },
+    "questions": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/question" }
+    }
+  },
+  "$defs": {
+    "question": {
+      "type": "object",
+      "required": ["stem", "answer", "q_type", "difficulty", "knowledge_points"],
+      "additionalProperties": false,
+      "properties": {
+        "stem": { "type": "string", "minLength": 1 },
+        "options": {
+          "type": "array",
+          "description": "选择题/圈选题的候选项，按显示顺序",
+          "items": { "type": "string" }
+        },
+        "answer": { "type": "string", "minLength": 1 },
+        "analysis": { "type": "string" },
+        "q_type": {
+          "enum": ["口算", "计算", "填空", "选择", "判断", "拼音", "字词", "笔画", "连线", "默写", "听写", "古诗", "字谜", "看图列式", "应用", "操作", "其他"]
+        },
+        "difficulty": { "type": "integer", "minimum": 1, "maximum": 3, "description": "1基础 2中等 3提优" },
+        "knowledge_points": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "images": {
+          "type": "array",
+          "description": "题目配图。CLI 拆解用 path（相对本 bundle 文件）；API 拆解可用 data_url。导入时统一收进本地资料库。",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "path": { "type": "string" },
+              "data_url": { "type": "string" },
+              "caption": { "type": "string" }
+            }
+          }
+        },
+        "source_page": { "type": "string" },
+        "unit_hint": {
+          "type": "object",
+          "description": "题目归属单元提示（对纲校验时优先使用）",
+          "additionalProperties": false,
+          "properties": {
+            "seq": { "type": "integer" },
+            "name": { "type": "string" }
+          }
+        },
+        "scope_status": {
+          "enum": ["ok", "extension", "suspect", "pending"],
+          "description": "显式指定对纲结论（如教辅的提优拓展题），缺省由系统按教材纲自动判定"
+        },
+        "scope_reason": { "type": "string" },
+        "status": {
+          "enum": ["draft", "confirmed"],
+          "description": "缺省 draft（待人工确认）；自编卷等可信来源可直接 confirmed"
+        },
+        "tags": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}
