@@ -26,8 +26,8 @@ onMounted(load)
         <td><router-link :to="`/papers/${p.id}`">{{ p.title }}</router-link></td>
         <td>{{ p.question_count }}</td><td>{{ p.total_score }}</td><td>{{ p.duration_minutes }} 分钟</td>
         <td class="btnrow">
-          <a :href="`/api/papers/${p.id}/export`"><button>下载 PDF</button></a>
-          <a :href="`/api/papers/${p.id}/view`" target="_blank"><button>打印视图</button></a>
+          <a :href="(p.config && p.config.source === 'canvas') ? `/api/papers/${p.id}/export-canvas` : `/api/papers/${p.id}/export`"><button>下载 PDF</button></a>
+          <a v-if="!(p.config && p.config.source === 'canvas')" :href="`/api/papers/${p.id}/view`" target="_blank"><button>打印视图</button></a>
           <button class="danger" @click="remove(p.id)">删除</button>
         </td>
       </tr>

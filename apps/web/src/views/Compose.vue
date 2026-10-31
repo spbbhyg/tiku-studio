@@ -198,7 +198,10 @@ onMounted(async () => {
 </script>
 
 <template>
-  <h2>组卷</h2>
+  <h2 style="display:flex;align-items:center;gap:12px">
+    组卷
+    <button class="ghost sm" @click="$router.push('/compose/canvas')">画布编排（像 PDF 编辑器）→</button>
+  </h2>
   <p class="muted">
     从题库勾选题目 → 右侧调顺序与分值 → 生成试卷；也可以按单元范围让系统随机抽题。
   </p>

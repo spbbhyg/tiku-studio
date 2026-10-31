@@ -23,6 +23,9 @@ const sections = computed(() => {
   }
   return Object.entries(by).map(([t, items]) => ({ type: t, items }))
 })
+const isCanvas = computed(() => !!(paper.value && paper.value.config && paper.value.config.source === 'canvas'))
+const canvasImg = computed(() => (paper.value && paper.value.config && paper.value.config.image) || '')
+
 const scoreSum = computed(() => (paper.value ? paper.value.items.reduce((s, i) => s + i.score, 0) : 0))
 
 async function replace(item) {
@@ -44,7 +47,26 @@ onMounted(async () => {
 
 <template>
   <div v-if="err" class="errbox">{{ err }}</div>
-  <template v-if="paper">
+  <template v-if="paper && isCanvas">
+    <div class="btnrow" style="margin-bottom:12px">
+      <a :href="`#/compose/canvas?id=${paper.id}`"><button class="primary">继续编排</button></a>
+      <a :href="`/api/papers/${paper.id}/export-canvas`"><button>下载 PDF</button></a>
+      <a href="#/compose/canvas"><button>新建一张</button></a>
+      <a href="#/papers"><button>← 试卷列表</button></a>
+    </div>
+    <div class="card">
+      <h2 style="text-align:center">{{ paper.title }}</h2>
+      <p class="muted" style="text-align:center">
+        {{ paper.subject }} · 限时 {{ paper.duration_minutes }} 分钟 · 画布编排
+        <span v-if="paper.total_score"> · 总分 {{ paper.total_score }}</span>
+      </p>
+      <div style="text-align:center; margin-top:10px">
+        <img :src="imgUrl(canvasImg)" alt="整卷" style="max-width:100%; border:1px solid var(--line); border-radius:8px" />
+      </div>
+    </div>
+  </template>
+
+  <template v-else-if="paper">
     <div class="btnrow" style="margin-bottom:12px">
       <a href="#/compose"><button>← 再组一卷</button></a>
       <a :href="`/api/papers/${paper.id}/export`"><button class="primary">下载 PDF（题目卷+答案卷）</button></a>

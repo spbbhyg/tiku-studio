@@ -8,8 +8,15 @@
         {"type": "image", "path": "questions/2026-10/xxx.png", "x": 48, "y": 60, "w": 480},
         {"type": "text",  "text": "设 $f(x)=x^2$，求……", "x": 48, "y": 300, "w": 480,
          "size": 12, "align": "left", "bold": false, "line": 1.5}
-      ]
+      ],
+      "meta": {                       # 可选：页眉页脚模板
+        "header": {"left": "", "center": "XX 大学 2026 期中考试", "right": ""},
+        "footer": {"left": "", "center": "第 1 页", "right": ""},
+        "name_line": true             # 是否画「姓名 / 班级 / 得分」栏
+      }
     }
+
+图片块可带 ``"rotate": 90``（0/90/180/270），顺时针旋转。
 """
 from __future__ import annotations
 
@@ -88,7 +95,20 @@ def _wrap_runs(runs: list[tuple[str, object]], font: pymupdf.Font, size: float,
     return [ln for ln in lines if ln] or [[]]
 
 
-def _draw_text(page: pymupdf.Page, block: dict) -> None:
+def _hex_color(value, default=(0.06, 0.07, 0.09)):
+    """把 '#rrggbb' 转成 PyMuPDF 需要的 0~1 RGB；非法值回退默认色。"""
+    try:
+        v = str(value or "").strip().lstrip("#")
+        if len(v) == 3:
+            v = "".join(c * 2 for c in v)
+        if len(v) != 6:
+            return default
+        return tuple(int(v[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+    except Exception:
+        return default
+
+
+def _draw_text(page: pymupdf.Page, block: dict) -> float:
     size = float(block.get("size") or 12)
     size = max(6.0, min(48.0, size))
     x = float(block.get("x") or 48)
@@ -116,7 +136,7 @@ def _draw_text(page: pymupdf.Page, block: dict) -> None:
             if kind == "text":
                 if payload:
                     page.insert_text((cx, base), payload, fontname=font_name,
-                                     fontsize=size, color=(0.06, 0.07, 0.09))
+                                     fontsize=size, color=_hex_color(block.get("color")))
             else:
                 latex, iw, ih = payload
                 r = math_png(latex, size)
@@ -127,8 +147,42 @@ def _draw_text(page: pymupdf.Page, block: dict) -> None:
                     page.insert_image(rect, stream=png)
             cx += w
         y += line_h
-    block = dict(block)
-    block["_bottom"] = y
+    return y
+
+
+def _band(page, parts: dict, y: float, size: float = 9.0, color=(0.35, 0.37, 0.42)) -> None:
+    """画一条三段式信息栏（左/中/右）。"""
+    font = pymupdf.Font(fontfile=str(FONT))
+    margin = 48.0
+    for key, text in (parts or {}).items():
+        text = (text or "").strip()
+        if not text:
+            continue
+        w = _text_width(font, text, size)
+        if key == "center":
+            x = (PAGE_W - w) / 2
+        elif key == "right":
+            x = PAGE_W - margin - w
+        else:
+            x = margin
+        page.insert_text((x, y), text, fontname="cn", fontsize=size, color=color)
+
+
+def _name_line(page, y: float, size: float = 10.0) -> None:
+    """姓名 / 班级 / 得分 栏（带下划线）。"""
+    font = pymupdf.Font(fontfile=str(FONT))
+    labels = ["姓名", "班级", "得分"]
+    slots = 3
+    margin = 48.0
+    gap = 24.0
+    slot_w = (PAGE_W - 2 * margin - gap * (slots - 1)) / slots
+    for i, label in enumerate(labels):
+        x0 = margin + i * (slot_w + gap)
+        text = f"{label}："
+        tw = _text_width(font, text, size)
+        page.insert_text((x0, y), text, fontname="cn", fontsize=size, color=(0.25, 0.27, 0.32))
+        page.draw_line(pymupdf.Point(x0 + tw, y + 2), pymupdf.Point(x0 + slot_w - 6, y + 2),
+                       color=(0.55, 0.58, 0.64), width=0.8)
 
 
 def _block_bottom(block: dict) -> float:
@@ -157,11 +211,32 @@ def _block_bottom(block: dict) -> float:
 
 def render_layout(layout: dict, dpi: int = 200) -> dict:
     """渲染版面 → {path(相对 data/library), abs, width, height}。"""
+    page_h = float((layout or {}).get("height") or PAGE_H)
     doc = pymupdf.open()
-    page = doc.new_page(width=PAGE_W, height=PAGE_H)
+    page = doc.new_page(width=PAGE_W, height=page_h)
     page.insert_font(fontname="cn", fontfile=str(FONT))
     page.insert_font(fontname="cnb", fontfile=str(FONT_B))
 
+    meta = (layout or {}).get("meta") or {}
+    _band(page, meta.get("header") or {}, y=44, size=9.5, color=(0.28, 0.30, 0.36))
+    if meta.get("name_line"):
+        _name_line(page, y=70, size=10.0)
+    if (meta.get("header") or {}) or meta.get("name_line"):
+        page.draw_line(pymupdf.Point(48, 84), pymupdf.Point(PAGE_W - 48, 84),
+                       color=(0.75, 0.78, 0.82), width=0.8)
+    if meta.get("footer"):
+        _band(page, meta.get("footer") or {}, y=page_h - 30, size=9.0)
+
+    # 有页眉/姓名栏时，正文整体下移，避免和页眉重叠
+    dy = 0.0
+    has_band = bool(meta.get("header")) or bool(meta.get("name_line"))
+    if has_band:
+        ys = [float(b.get("y") or 0) for b in (layout or {}).get("blocks", [])
+              if b.get("type") in ("image", "text")]
+        if ys and min(ys) < 100:
+            dy = 100.0 - min(ys)
+
+    content_bottom = 0.0
     for block in (layout or {}).get("blocks", []):
         kind = block.get("type")
         if kind == "image":
@@ -169,7 +244,7 @@ def render_layout(layout: dict, dpi: int = 200) -> dict:
             if not p:
                 continue
             x = float(block.get("x") or 40)
-            y = float(block.get("y") or 40)
+            y = float(block.get("y") or 40) + dy
             w = float(block.get("w") or 400)
             h = float(block.get("h") or 0)
             if not h:
@@ -181,9 +256,25 @@ def render_layout(layout: dict, dpi: int = 200) -> dict:
                 except Exception:
                     h = w * 0.4
             rect = pymupdf.Rect(x, y, x + w, y + h)
-            page.insert_image(rect, filename=str(p), keep_proportion=True)
+            rotate = int(block.get("rotate") or 0) % 360
+            page.insert_image(rect, filename=str(p), keep_proportion=True,
+                              rotate=rotate if rotate else 0)
+            content_bottom = max(content_bottom, y + h)
         elif kind == "text":
-            _draw_text(page, block)
+            shifted = dict(block)
+            shifted["y"] = float(block.get("y") or 0) + dy
+            content_bottom = max(content_bottom, _draw_text(page, shifted))
+
+    trim = bool((layout or {}).get("trim"))
+    if trim:
+        pad = float((layout or {}).get("trim_pad") or 24)
+        floor_y = 84.0 if (meta.get("header") or meta.get("name_line")) else 0.0
+        if meta.get("footer"):
+            keep_h = page_h
+        else:
+            keep_h = min(page_h, max(120.0, max(content_bottom, floor_y) + pad))
+        if keep_h < page_h - 1:
+            page.set_cropbox(pymupdf.Rect(0, 0, PAGE_W, keep_h))
 
     stamp = datetime.now().strftime("%H%M%S")
     sub = datetime.now().strftime("%Y-%m")
@@ -203,5 +294,8 @@ def render_layout(layout: dict, dpi: int = 200) -> dict:
 
 
 def layout_hash(layout: dict) -> str:
-    raw = repr(sorted((layout or {}).get("blocks", []), key=lambda b: (b.get("type"), b.get("y"))))
+    """版面指纹：块 + 页眉页脚模板都参与，改了模板也算新题目。"""
+    layout = layout or {}
+    blocks = sorted(layout.get("blocks", []), key=lambda b: (b.get("type"), b.get("y")))
+    raw = repr((blocks, layout.get("meta") or {}))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]

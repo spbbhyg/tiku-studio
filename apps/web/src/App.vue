@@ -10,9 +10,7 @@ const navs = [
   { path: '/compose', label: '组卷' },
   { path: '/papers', label: '试卷' },
   { path: '/books', label: '资料库' },
-  { path: '/tags', label: '标签管理' },
   { path: '/quizforge', label: 'QF题库' },
-  { path: '/ingest', label: 'AI拆解' },
   { path: '/settings', label: '设置' },
 ]
 

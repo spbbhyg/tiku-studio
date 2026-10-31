@@ -27,6 +27,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
+from ..services import versions as version_svc
 from ..models import AuthoringTag, Book, Question, Setting, Unit
 from ..services import authoring_export as exporter
 from ..services.bundle_import import _question_hash
@@ -306,6 +307,7 @@ def update_question(question_id: int, body: AuthoringQuestionIn, db: Session = D
         raise HTTPException(404, "题目不存在")
     if not (body.stem or "").strip() and not body.stem_image:
         raise HTTPException(400, "题干文本与题干图不能同时为空")
+    version_svc.take_snapshot(db, q, note="编辑前")
     _apply(q, body, db)
     if body.book_id:
         if not db.get(Book, body.book_id):
@@ -344,6 +346,8 @@ class ComposeIn(BaseModel):
     locator: str = ""
     status: str = "confirmed"
     answer: str = ""
+    answer_images: list[str] = Field(default_factory=list)
+    answer_layout: dict | None = None
 
 
 @router.post("/compose")
@@ -361,6 +365,9 @@ def compose_question(body: ComposeIn, db: Session = Depends(get_db)):
         raise HTTPException(400, "单元不存在")
 
     rendered = compose_render.render_layout(body.layout)
+    ans_rendered = None
+    if body.answer_layout and (body.answer_layout.get("blocks") or []):
+        ans_rendered = compose_render.render_layout(body.answer_layout)
     content_hash = compose_render.layout_hash(body.layout)
     tags = [t.strip() for t in body.tags if t and t.strip()]
 
@@ -383,8 +390,16 @@ def compose_question(body: ComposeIn, db: Session = Depends(get_db)):
     q.q_type = body.q_type if body.q_type in Q_TYPES else "简答"
     q.difficulty = body.difficulty if body.difficulty in (1, 2, 3) else 2
     q.tags = tags
-    q.images = [{"path": rendered["path"], "caption": "题干"}]
+    imgs = [{"path": rendered["path"], "caption": "题干"}]
+    if ans_rendered:
+        imgs.append({"path": ans_rendered["path"], "caption": "答案"})
+    for ap in (body.answer_images or []):
+        ap = (ap or "").strip()
+        if ap and ap != (ans_rendered or {}).get("path"):
+            imgs.append({"path": ap, "caption": "答案"})
+    q.images = imgs
     q.layout = body.layout
+    q.answer_layout = body.answer_layout or None
     q.source_title = (body.source_title or "").strip() or None
     q.source_citation = (body.source_citation or "").strip() or None
     q.source_page = (body.locator or "").strip() or None
@@ -394,7 +409,8 @@ def compose_question(body: ComposeIn, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(q)
     return {"id": q.id, "created": created, "image": rendered["path"],
-            "width": rendered["width"], "height": rendered["height"]}
+            "width": rendered["width"], "height": rendered["height"],
+            "answer_image": (ans_rendered or {}).get("path")}
 
 
 @router.get("/compose/{question_id}")
@@ -404,11 +420,15 @@ def get_compose(question_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "题目不存在")
     return {
         "id": q.id, "layout": q.layout or {"blocks": []},
+        "answer_layout": q.answer_layout or {"blocks": []},
         "book_id": q.book_id, "unit_id": q.unit_id, "q_type": q.q_type,
         "difficulty": q.difficulty, "tags": q.tags or [], "answer": q.answer or "",
         "source_title": q.source_title or "", "source_citation": q.source_citation or "",
         "locator": q.source_page or "", "status": q.status,
-        "stem_image": next((i.get("path") for i in (q.images or [])), None),
+        "stem_image": next((i.get("path") for i in q.images or []), None),
+        "stem_image2": None,
+        "answer_images": [i.get("path") for i in (q.images or [])
+                          if (i.get("caption") or "") == "答案"],
     }
 
 

@@ -10,8 +10,7 @@ from sqlalchemy.orm import Session
 from ..config import LIBRARY_DIR, SCHEMA_DIR
 from ..db import get_db
 from ..models import Book, Paper, Question
-from ..schemas import SettingsIn, SettingsOut, StatsOut
-from ..services import ingest_llm
+from ..schemas import StatsOut
 
 router = APIRouter(prefix="/api", tags=["meta"])
 
@@ -38,26 +37,6 @@ def stats(db: Session = Depends(get_db)):
         extension_questions=count(Question, Question.scope_status == "extension"),
         papers=count(Paper), by_subject=by_subject, by_type=by_type,
     )
-
-
-@router.get("/settings", response_model=SettingsOut)
-def get_settings(db: Session = Depends(get_db)):
-    cfg = ingest_llm.get_settings(db)
-    if cfg.get("llm_api_key"):
-        cfg["llm_api_key"] = cfg["llm_api_key"][:4] + "****" if len(cfg["llm_api_key"]) > 4 else "****"
-    return SettingsOut(**cfg)
-
-
-@router.put("/settings", response_model=SettingsOut)
-def put_settings(body: SettingsIn, db: Session = Depends(get_db)):
-    patch = body.model_dump(exclude_unset=True)
-    # 掩码值不覆盖真实 key
-    if patch.get("llm_api_key", "").endswith("****"):
-        patch.pop("llm_api_key", None)
-    cfg = ingest_llm.save_settings(db, patch)
-    if cfg.get("llm_api_key"):
-        cfg["llm_api_key"] = cfg["llm_api_key"][:4] + "****" if len(cfg["llm_api_key"]) > 4 else "****"
-    return SettingsOut(**cfg)
 
 
 @router.get("/images/{path:path}")

@@ -109,6 +109,10 @@ class Question(Base):
     tags: Mapped[list] = mapped_column(JSON, default=list)
     # 大题版面（出题页画布的 JSON 快照），便于再次打开继续排版
     layout: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    answer_layout: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 归属的整卷 / 届次（可选）
+    set_id: Mapped[int | None] = mapped_column(ForeignKey("question_sets.id", ondelete="SET NULL"),
+                                              nullable=True, index=True)
 
     scope_status: Mapped[str] = mapped_column(String(16), default="pending")
     scope_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -118,6 +122,7 @@ class Question(Base):
 
     book: Mapped[Book] = relationship(back_populates="questions", foreign_keys=[book_id])
     unit: Mapped[Unit | None] = relationship()
+    qset: Mapped["QuestionSet | None"] = relationship(back_populates="questions")
 
 
 class Paper(Base):
@@ -178,3 +183,31 @@ class AuthoringTag(Base):
     seq: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
+
+class QuestionSet(Base):
+    """整卷 / 届次：把题目按「哪份卷子、哪一届」聚合（对应 Chemy 的届次/试卷维度）。"""
+
+    __tablename__ = "question_sets"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), unique=True)
+    year: Mapped[int | None] = mapped_column(Integer, nullable=True)          # 届次 / 年份
+    source: Mapped[str | None] = mapped_column(String(200), nullable=True)    # 来源：某校期中卷 / 某竞赛
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    questions: Mapped[list["Question"]] = relationship(back_populates="qset")
+
+
+class QuestionVersion(Base):
+    """题目历史版本：每次编辑前存一份快照，可回滚、可对比。"""
+
+    __tablename__ = "question_versions"
+    __table_args__ = (Index("ix_qv_question", "question_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    question_id: Mapped[int] = mapped_column(ForeignKey("questions.id", ondelete="CASCADE"))
+    version_no: Mapped[int] = mapped_column(Integer, default=1)
+    note: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

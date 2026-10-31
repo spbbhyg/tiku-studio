@@ -203,6 +203,77 @@ def upload_image(body: ImageIn):
     return {"path": saved["path"], "bytes": saved["bytes"]}
 
 
+@router.post("/trim")
+def trim_image(body: dict):
+    """裁掉纯白边，并估算字号：返回 {path,width,height,cropped,font_pt,px_per_pt}。"""
+    body = body or {}
+    rel = str(body.get("path") or "")
+    if not rel:
+        raise HTTPException(400, "缺少 path")
+    try:
+        px_per_pt = float(body.get("px_per_pt") or 3.0)
+    except Exception:
+        px_per_pt = 3.0
+    src = (LIBRARY_DIR / rel).resolve()
+    if not str(src).startswith(str(LIBRARY_DIR.resolve())) or not src.is_file():
+        raise HTTPException(404, "图片不存在")
+    try:
+        from io import BytesIO
+
+        from PIL import Image, ImageChops
+    except Exception:
+        raise HTTPException(501, "缺少 Pillow，无法处理图片")
+
+    def _font_px(img) -> float:
+        """按行投影估算正文字高（像素）。"""
+        g = img.convert("L")
+        w, h = g.size
+        data = list(g.getdata())
+        rows = []
+        for y in range(h):
+            row = data[y * w:(y + 1) * w]
+            rows.append(sum(1 for v in row if v < 150))
+        bands, inband, start = [], False, 0
+        for y, cnt in enumerate(rows):
+            on = cnt > max(2, w * 0.004)
+            if on and not inband:
+                inband, start = True, y
+            elif not on and inband:
+                inband = False
+                if y - start >= 3:
+                    bands.append(y - start)
+        if inband and h - start >= 3:
+            bands.append(h - start)
+        if not bands:
+            return 0.0
+        bands.sort()
+        return float(bands[len(bands) // 2])
+
+    im = Image.open(src).convert("RGB")
+    bg = Image.new("RGB", im.size, (255, 255, 255))
+    box = ImageChops.difference(im, bg).getbbox()
+    if not box:
+        raise HTTPException(400, "整张图都是空白")
+
+    pad = 10
+    x0, y0, x1, y1 = box
+    x0 = max(0, x0 - pad); y0 = max(0, y0 - pad)
+    x1 = min(im.width, x1 + pad); y1 = min(im.height, y1 + pad)
+    out = im.crop((x0, y0, x1, y1))
+    font_px = _font_px(im.crop(box))      # 用未加留白的区域估字号
+    font_pt = round(font_px / px_per_pt, 2) if px_per_pt > 0 else 0
+
+    if (x1 - x0, y1 - y0) == im.size:
+        return {"path": rel, "width": im.width, "height": im.height, "cropped": False,
+                "font_pt": font_pt, "px_per_pt": px_per_pt}
+
+    buf = BytesIO()
+    out.save(buf, format="PNG")
+    info = _save_png(buf.getvalue())
+    return {"path": info["path"], "width": out.width, "height": out.height, "cropped": True,
+            "font_pt": font_pt, "px_per_pt": px_per_pt}
+
+
 @router.delete("/image")
 def delete_image(path: str):
     """删除自己上传的题图（只允许删 data/library/questions 下的文件）。"""

@@ -1,4 +1,5 @@
 <script setup>
+const props = defineProps({ embedded: { type: Boolean, default: false } })
 import { computed, onMounted, reactive, ref } from 'vue'
 import { api } from '../api.js'
 
@@ -90,7 +91,7 @@ onMounted(load)
 
 <template>
   <div class="tags-page">
-    <h2>标签管理</h2>
+    <h2 v-if="!props.embedded">标签管理</h2>
     <p class="muted">题库与出题共用同一套标签。默认按「专题」分组（仿 Chemy 九大专题），也可以自建分组。</p>
 
     <div v-if="err" class="errbox">{{ err }}</div>

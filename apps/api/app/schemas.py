@@ -63,6 +63,9 @@ class QuestionOut(ORMModel):
     book_title: str = ""
     unit_name: Optional[str] = None
     unit_seq: Optional[int] = None
+    set_id: Optional[int] = None
+    set_name: Optional[str] = None
+    set_year: Optional[int] = None
 
 
 class QuestionPatch(BaseModel):
@@ -80,6 +83,7 @@ class QuestionPatch(BaseModel):
     tags: Optional[list[str]] = None
     source_title: Optional[str] = None
     source_citation: Optional[str] = None
+    set_id: Optional[int] = None
 
 
 class PaperGenerate(BaseModel):
@@ -132,22 +136,6 @@ class PaperBrief(BaseModel):
     duration_minutes: int
     question_count: int
     created_at: datetime
-
-
-class SettingsOut(BaseModel):
-    llm_provider: str = "glm"          # glm | deepseek | openai | custom
-    llm_base_url: str = ""
-    llm_api_key: str = ""
-    llm_model: str = ""
-    max_pages: int = 30
-
-
-class SettingsIn(BaseModel):
-    llm_provider: Optional[str] = None
-    llm_base_url: Optional[str] = None
-    llm_api_key: Optional[str] = None
-    llm_model: Optional[str] = None
-    max_pages: Optional[int] = None
 
 
 class StatsOut(BaseModel):

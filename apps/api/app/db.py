@@ -41,6 +41,11 @@ def _migrate() -> None:
                 conn.execute(text("ALTER TABLE questions ADD COLUMN source_citation TEXT"))
             if "layout" not in cols:
                 conn.execute(text("ALTER TABLE questions ADD COLUMN layout JSON"))
+            if "answer_layout" not in cols:
+                conn.execute(text("ALTER TABLE questions ADD COLUMN answer_layout JSON"))
+            if "set_id" not in cols:
+                conn.execute(text("ALTER TABLE questions ADD COLUMN set_id INTEGER"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_questions_set ON questions (set_id)"))
         # 文献出题已并入主题库，独立表不再使用
         if "authoring_questions" in tables:
             conn.execute(text("DROP TABLE authoring_questions"))

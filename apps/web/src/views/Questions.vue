@@ -27,6 +27,13 @@ const topicGroups = ref([])
 const activeTag = ref('')
 const qtypes = ref([])
 
+const LS_SIDE = 'tiku-bank-side'
+const sideOpen = ref(localStorage.getItem(LS_SIDE) !== '0')
+function toggleSide() {
+  sideOpen.value = !sideOpen.value
+  localStorage.setItem(LS_SIDE, sideOpen.value ? '1' : '0')
+}
+
 const f = reactive({ q: '', q_type: '', difficulty: '', status: '' })
 
 const sel = ref(new Set())
@@ -36,6 +43,13 @@ const zoomImg = ref('')
 const showExport = ref(false)
 const exporting = ref('')
 const exportOpts = reactive({ title: '练习卷', answers: 'appendix', analysis: true, tags: true, source: true })
+
+const sets = ref([])              // [{id,name,year,count}]
+const unfiled = ref(0)
+const activeSet = ref('')         // '' | 'unfiled' | '3'
+const showSets = ref(false)       // 「归入整卷」弹窗
+const newSet = reactive({ name: '', year: new Date().getFullYear(), busy: false })
+const vers = ref(null)            // { q, items, busy }
 
 const showImport = ref(false)
 const qf = reactive({ found: false, db_path: '', banks: [], hint: '', busy: '', result: null, picked: [] })
@@ -61,6 +75,14 @@ async function loadTopics() {
   } catch (e) { err.value = e.message }
 }
 
+async function loadSets() {
+  try {
+    const data = await api.get('/api/sets')
+    sets.value = data.items || []
+    unfiled.value = data.unfiled || 0
+  } catch (e) { sets.value = [] }
+}
+
 async function loadQtypes() {
   try { qtypes.value = await api.get('/api/qtypes') } catch (e) { qtypes.value = [] }
 }
@@ -74,6 +96,7 @@ async function load() {
     if (f.difficulty) p.set('difficulty', f.difficulty)
     if (f.status) p.set('status', f.status)
     if (activeTag.value) p.set('tag', activeTag.value)
+    if (activeSet.value) p.set('set_id', activeSet.value === 'unfiled' ? '-1' : activeSet.value)
     const data = await api.get('/api/questions?' + p.toString())
     items.value = data.items || []
     total.value = data.total || 0
@@ -112,10 +135,90 @@ function toggleAll() {
   sel.value = s
 }
 function clearSel() { sel.value = new Set() }
+function answerImgs(q) {
+  return (q.images || []).filter((i) => (i.caption || '') === '答案')
+}
+
 function toggleAnswer(id) {
   const s = new Set(openAnswers.value)
   s.has(id) ? s.delete(id) : s.add(id)
   openAnswers.value = s
+}
+
+function pickSet(v) {
+  activeSet.value = activeSet.value === v ? '' : v
+  page.value = 1
+  load()
+}
+
+/** 把整卷题目一次性加入已选 */
+async function selectWholeSet() {
+  if (!activeSet.value || activeSet.value === 'unfiled') return
+  try {
+    const data = await api.get(`/api/sets/${activeSet.value}/question-ids`)
+    const s2 = new Set(sel.value)
+    for (const id of data.question_ids || []) s2.add(id)
+    sel.value = s2
+    msg.value = `已把整卷 ${data.question_ids.length} 题加入已选`
+  } catch (e) { err.value = e.message }
+}
+
+async function doAssign(setId) {
+  try {
+    const data = await api.post(`/api/sets/${setId}/assign`, { question_ids: selList.value })
+    msg.value = `已归入整卷：${data.assigned} 题`
+    showSets.value = false
+    await Promise.all([load(), loadSets()])
+  } catch (e) { err.value = e.message }
+}
+
+async function createSetAndAssign() {
+  if (!newSet.name.trim()) { err.value = '先填一个卷名'; return }
+  newSet.busy = true
+  try {
+    const made = await api.post('/api/sets', { name: newSet.name.trim(), year: Number(newSet.year) || 0 })
+    await doAssign(made.id)
+    newSet.name = ''
+  } catch (e) { err.value = e.message }
+  newSet.busy = false
+}
+
+async function detachSelected() {
+  try {
+    const data = await api.post('/api/sets/detach', { question_ids: selList.value })
+    msg.value = `已移出整卷：${data.detached} 题`
+    await Promise.all([load(), loadSets()])
+  } catch (e) { err.value = e.message }
+}
+
+async function trimBlank(q) {
+  try {
+    const r = await api.post(`/api/questions/${q.id}/trim`)
+    msg.value = `已裁剪 #${r.id}（${r.width}×${r.height}）`
+    await load()
+  } catch (e) { err.value = e?.message || String(e) }
+}
+
+async function openVersions(q) {
+  vers.value = { q, items: [], busy: true }
+  try {
+    const data = await api.get(`/api/questions/${q.id}/versions`)
+    vers.value = { q, items: data.items || [], busy: false }
+  } catch (e) { vers.value = { q, items: [], busy: false }; err.value = e.message }
+}
+
+async function restoreVersion(v) {
+  try {
+    await api.post(`/api/questions/${vers.value.q.id}/versions/${v.id}/restore`)
+    msg.value = `已回滚到第 ${v.version_no} 版`
+    await openVersions(vers.value.q)
+    await load()
+  } catch (e) { err.value = e.message }
+}
+
+function fmtTime(t) {
+  if (!t) return ''
+  return String(t).replace('T', ' ').slice(0, 16)
 }
 
 function goCompose() {
@@ -221,7 +324,7 @@ async function uploadDb(event) {
 }
 
 onMounted(async () => {
-  await Promise.all([loadTopics(), loadQtypes()])
+  await Promise.all([loadTopics(), loadQtypes(), loadSets()])
   // 支持 ?tag=QuizForge / ?tag=分析化学 这类直达筛选
   const t = String(route.query.tag || '').trim()
   if (t) activeTag.value = t
@@ -231,9 +334,34 @@ onMounted(async () => {
 
 <template>
   <h2>题库</h2>
-  <p class="muted">
-    按专题找题（仿 Chemy 的九大专题），也可关键词检索；勾选后可一键组卷或导出 Word / PDF / Markdown。
-  </p>
+
+  <div class="bank" :class="{ collapsed: !sideOpen }">
+    <button v-if="!sideOpen" class="side-tab" title="展开分类" @click="toggleSide">»</button>
+    <aside v-show="sideOpen" class="bank-side">
+      <div class="shead-row">
+        <span class="muted">分类</span>
+        <button class="ghost sm" title="收起分类" @click="toggleSide">«</button>
+      </div>
+      <div class="sgroup">
+        <div class="shead">专题</div>
+        <button class="sitem" :class="{ on: !activeTag }" @click="activeTag = ''; search()">全部题目</button>
+        <button v-for="t in topicTags" :key="t.id" class="sitem"
+                :class="{ on: activeTag === t.name }" @click="pickTag(t.name)">{{ t.name }}</button>
+      </div>
+      <div class="sgroup" v-if="sets.length || unfiled">
+        <div class="shead">整卷</div>
+        <button class="sitem" :class="{ on: !activeSet }" @click="activeSet = ''; search()">全部</button>
+        <button class="sitem" :class="{ on: activeSet === 'unfiled' }" @click="pickSet('unfiled')">
+          未归卷 <i>{{ unfiled }}</i>
+        </button>
+        <button v-for="st in sets" :key="st.id" class="sitem"
+                :class="{ on: activeSet === String(st.id) }" @click="pickSet(String(st.id))">
+          {{ st.name }} <i>{{ st.count }}</i>
+        </button>
+      </div>
+    </aside>
+
+    <main class="bank-main">
 
   <div class="card q-toolbar">
     <div class="searchrow">
@@ -244,11 +372,7 @@ onMounted(async () => {
       <button class="ghost" @click="openImport">⤓ 从 QuizForge 导入</button>
     </div>
 
-    <div class="topics">
-      <button class="chip" :class="{ on: !activeTag }" @click="activeTag = ''; search()">全部专题</button>
-      <button v-for="t in topicTags" :key="t.id" class="chip" :class="{ on: activeTag === t.name }"
-              @click="pickTag(t.name)">{{ t.name }}</button>
-    </div>
+
 
     <div class="frow countrow">
       <span class="muted">共 {{ total }} 题<template v-if="activeTag"> · 专题「{{ activeTag }}」</template></span>
@@ -262,6 +386,10 @@ onMounted(async () => {
     <label class="chk"><input type="checkbox" :checked="allChecked" @change="toggleAll" /> 全选本页</label>
     <span class="muted">已选 {{ selList.length }} 题</span>
     <button class="ghost" :disabled="!selList.length" @click="clearSel">清空已选</button>
+    <button class="ghost" v-if="activeSet && activeSet !== 'unfiled'"
+            @click="selectWholeSet">整卷加入已选</button>
+    <button class="ghost" :disabled="!selList.length" @click="showSets = true">归入整卷…</button>
+    <button class="ghost" :disabled="!selList.length" @click="detachSelected">移出整卷</button>
     <span class="spacer"></span>
     <button :disabled="!selList.length" @click="goCompose">用所选组卷 →</button>
     <button class="primary" :disabled="!total" @click="showExport = true">
@@ -287,14 +415,22 @@ onMounted(async () => {
             <template v-if="q.source_title"> · {{ q.source_title }}</template>
             <template v-if="q.source_page"> · {{ q.source_page }}</template>
           </span>
+          <span v-if="q.set_name" class="chip sm2 setchip">{{ q.set_name }}</span>
         </div>
-        <div class="q-stem" v-html="renderMath(q.stem) || '<i class=muted>（纯图片题）</i>'"></div>
         <div v-if="stemImg(q)" class="qfigs">
           <img :src="imgUrl(stemImg(q).path)" alt="题图" @click="zoomImg = imgUrl(stemImg(q).path)" />
         </div>
-        <div v-if="q.options && q.options.length" class="qopts">
-          <span v-for="(o, i) in q.options" :key="i">{{ o }}</span>
+        <div v-if="answerImgs(q).length" class="ansfigs direct">
+          <span class="alabel">答案图</span>
+          <img v-for="(im, i) in answerImgs(q)" :key="'a' + i" :src="imgUrl(im.path)" alt="答案图"
+               @click="zoomImg = imgUrl(im.path)" />
         </div>
+        <template v-else>
+          <div class="q-stem" v-html="renderMath(q.stem) || '<i class=muted>（无题干）</i>'"></div>
+          <div v-if="q.options && q.options.length" class="qopts">
+            <span v-for="(o, i) in q.options" :key="i">{{ o }}</span>
+          </div>
+        </template>
         <div class="q-tags">
           <span v-for="t in q.tags" :key="t" class="chip sm2" @click="pickTag(t)">{{ t }}</span>
         </div>
@@ -302,11 +438,13 @@ onMounted(async () => {
           <button class="ghost sm" @click="toggleAnswer(q.id)">
             {{ openAnswers.has(q.id) ? '收起答案' : '查看参考答案' }}
           </button>
+          <button class="ghost sm" @click="trimBlank(q)" title="按版面重渲染，裁掉下方空白">裁空白</button>
+        <button class="ghost sm" @click="openVersions(q)">历史</button>
           <router-link class="ghost sm" :to="{ path: '/author', query: { id: q.id } }">编辑</router-link>
           <button class="ghost sm danger" @click="deleteOne(q.id)">删除</button>
         </div>
         <div v-if="openAnswers.has(q.id)" class="answerbox">
-          <div class="ans" v-html="renderMath(q.answer) || '<i class=muted>（见答案图）</i>'"></div>
+          <div class="ans" v-html="renderMath(q.answer) || '<i class=muted>（答案见上方答案图）</i>'"></div>
           <div v-if="q.analysis" class="ana" v-html="'解析：' + renderMath(q.analysis)"></div>
         </div>
       </div>
@@ -321,6 +459,9 @@ onMounted(async () => {
     <button :disabled="page <= 1" @click="goPage(-1)">上一页</button>
     <span class="muted">第 {{ page }} / {{ pages }} 页</span>
     <button :disabled="page >= pages" @click="goPage(1)">下一页</button>
+  </div>
+
+    </main>
   </div>
 
   <!-- 图片放大 -->
@@ -352,6 +493,56 @@ onMounted(async () => {
         <button class="ghost" @click="showExport = false">取消</button>
       </div>
       <p class="muted" style="font-size:12px">公式会渲染成清晰的小图嵌入文档；PDF 用等线排版，可直接打印。</p>
+    </div>
+  </div>
+
+  <!-- 归入整卷 -->
+  <div v-if="showSets" class="modal" @click.self="showSets = false">
+    <div class="modal-card">
+      <h3>把所选 {{ selList.length }} 题归入整卷</h3>
+      <p class="muted" style="font-size:12.5px">
+        整卷相当于「某一届 / 某一份卷」，方便按卷浏览、整卷勾选和整卷加入组卷。
+      </p>
+      <div v-if="sets.length" class="setpick">
+        <button v-for="st in sets" :key="st.id" class="ghost" @click="doAssign(st.id)">
+          {{ st.name }}<span class="muted">（{{ st.count }} 题）</span>
+        </button>
+      </div>
+      <p v-else class="muted">还没有整卷，下面新建一个。</p>
+      <div class="frow" style="margin-top:10px">
+        <input v-model="newSet.name" placeholder="新卷名，如：2026 秋季期中 A 卷" style="flex:1 1 260px" />
+        <input v-model="newSet.year" type="number" placeholder="年份" style="width:110px" />
+        <button class="primary" :disabled="newSet.busy" @click="createSetAndAssign">新建并归入</button>
+      </div>
+      <div class="btnrow" style="margin-top:12px">
+        <button class="ghost" @click="showSets = false">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 版本历史 -->
+  <div v-if="vers" class="modal" @click.self="vers = null">
+    <div class="modal-card">
+      <h3>#{{ vers.q.id }} 的版本历史</h3>
+      <p class="muted" style="font-size:12.5px">
+        每次编辑前都会自动留一版快照；回滚会把当前状态再存一版，回滚本身也能反悔。
+      </p>
+      <div v-if="vers.busy" class="muted">加载中…</div>
+      <div v-else-if="!vers.items.length" class="muted">还没有历史版本（尚未编辑过）。</div>
+      <table v-else class="vtable">
+        <thead><tr><th>版本</th><th>时间</th><th>说明</th><th></th></tr></thead>
+        <tbody>
+          <tr v-for="v in vers.items" :key="v.id">
+            <td>v{{ v.version_no }}</td>
+            <td class="muted">{{ fmtTime(v.created_at) }}</td>
+            <td>{{ v.note || '—' }}</td>
+            <td><button class="ghost sm" @click="restoreVersion(v)">回滚到此版</button></td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="btnrow" style="margin-top:12px">
+        <button class="ghost" @click="vers = null">关闭</button>
+      </div>
     </div>
   </div>
 
@@ -408,22 +599,32 @@ onMounted(async () => {
 
 .qgrid { display: flex; flex-direction: column; gap: 10px; }
 .qcard {
-  display: flex; gap: 10px; padding: 12px 14px; background: #fff;
-  border: 1px solid var(--line); border-radius: 10px;
+  display: flex; gap: 14px; padding: 18px 20px; background: #fff;
+  border: 1px solid var(--line); border-radius: 12px;
 }
 .qcard.picked { border-color: var(--brand); box-shadow: 0 0 0 1px var(--brand) inset; }
 .q-left { display: flex; gap: 8px; align-items: flex-start; padding-top: 2px; }
 .q-left .no { font-size: 12px; color: #98a2b3; }
 .q-main { flex: 1; min-width: 0; }
-.q-meta-line { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-bottom: 6px; }
+.q-meta-line { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
 .src { font-size: 12px; color: #8a94a6; }
 .chip.draft { background: #fff7e6; border-color: #ffd8a8; color: #b26a00; }
-.q-stem { font-size: 14.5px; line-height: 1.72; color: #1f2937; }
+.q-stem { font-size: 16px; line-height: 1.78; color: #1f2937; }
 .q-stem :deep(p) { margin: 0 0 4px; }
-.qfigs { margin: 8px 0 4px; }
+.ansfigs { display: flex; gap: 10px; flex-wrap: wrap; margin: 8px 0 2px; }
+.ansfigs.direct { flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 8px; }
+.ansfigs .alabel {
+  align-self: flex-start; font-size: 12px; color: #667085; background: #f2f4f7;
+  border-radius: 6px; padding: 3px 8px; white-space: nowrap;
+}
+.ansfigs img {
+  max-width: 420px; max-height: 320px; border: 1px solid var(--line);
+  border-radius: 8px; background: #fff; cursor: zoom-in;
+}
+.qfigs { margin: 10px 0 6px; }
 .qfigs img {
-  max-width: 420px; max-height: 260px; border: 1px solid var(--line);
-  border-radius: 8px; cursor: zoom-in; background: #fff;
+  width: auto; height: auto; max-width: 100%; max-height: 520px;
+  border: 1px solid var(--line); border-radius: 8px; cursor: zoom-in; background: #fff;
 }
 .qopts { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13.5px; color: #374151; margin: 4px 0; }
 .q-tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 4px; }
@@ -460,5 +661,53 @@ onMounted(async () => {
 .sm-upload span {
   display: inline-block; padding: 7px 12px; border: 1px dashed var(--line);
   border-radius: 8px; font-size: 13px; color: #475467;
+}
+</style>
+
+<style scoped>
+.setlabel { font-size: 12px; color: #8a94a6; align-self: center; }
+.topics.sets .chip .cnt {
+  margin-left: 6px; padding: 0 5px; border-radius: 8px;
+  background: rgba(0, 0, 0, 0.06); font-size: 11px;
+}
+.topics.sets .chip.on .cnt { background: rgba(255, 255, 255, 0.25); }
+.chip.setchip { background: #eef2ff; border-color: #dbe3ff; color: #3b5bdb; }
+.setpick { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.setpick .ghost { text-align: left; }
+.vtable { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+.vtable th, .vtable td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.vtable th { color: #8a94a6; font-weight: 600; font-size: 12px; }
+</style>
+
+<style scoped>
+.bank { display: grid; grid-template-columns: 246px minmax(0, 1fr); gap: 16px; align-items: start; }
+.bank.collapsed { grid-template-columns: 26px minmax(0, 1fr); }
+.side-tab {
+  width: 26px; height: 76px; border-radius: 8px; border: 1px solid var(--line);
+  background: #fff; color: #667085; cursor: pointer; padding: 0; font-size: 15px;
+}
+.side-tab:hover { color: var(--brand); border-color: var(--brand); }
+.shead-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.shead-row .ghost.sm { padding: 2px 8px; }
+.bank-side {
+  position: sticky; top: 16px; display: flex; flex-direction: column; gap: 14px;
+  background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 10px;
+}
+.sgroup { display: flex; flex-direction: column; gap: 2px; }
+.shead { font-size: 12px; color: #8a94a6; padding: 4px 8px 6px; letter-spacing: .02em; }
+.sitem {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 7px 9px; border: 1px solid transparent; border-radius: 7px;
+  background: transparent; color: #475467; font-size: 13px; text-align: left; cursor: pointer;
+}
+.sitem:hover { background: #f4f7fb; }
+.sitem.on { background: #eef3ff; border-color: #dbe3ff; color: #2f6fed; font-weight: 600; }
+.sitem i { font-style: normal; font-size: 11.5px; color: #98a2b3; }
+.sitem.on i { color: #4c7ef3; }
+.bank-main { min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.bank-main .q-toolbar { margin: 0; }
+@media (max-width: 1080px) {
+  .bank { grid-template-columns: 1fr; }
+  .bank-side { position: static; flex-direction: row; flex-wrap: wrap; }
 }
 </style>
