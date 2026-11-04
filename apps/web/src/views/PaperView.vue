@@ -35,6 +35,40 @@ async function replace(item) {
     paper.value = await api.get(`/api/papers/${paper.value.id}`)
   } catch (e) { err.value = e.message }
 }
+async function logExport(kind, fileName, fileSize) {
+  if (!paper.value) return
+  try {
+    await api.post(`/api/wb/papers/${paper.value.id}/log-export`, {
+      kind, file_name: fileName || '', file_size: fileSize || 0,
+    })
+  } catch (e) { /* 记日志失败不打断下载 */ }
+}
+
+async function downloadPdf(url, name) {
+  err.value = ''
+  try {
+    const resp = await fetch(url)
+    if (!resp.ok) throw new Error(`导出失败（${resp.status}）`)
+    const blob = await resp.blob()
+    const stamp = new Date().toISOString().slice(0, 10)
+    const fileName = `${(name || paper.value.title || '试卷')}-${stamp}.pdf`
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = fileName
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000)
+    await logExport('pdf', fileName, blob.size)
+  } catch (e) { err.value = e.message }
+}
+
+function openView(part) {
+  const url = `/api/papers/${paper.value.id}/view?part=${part}`
+  const w = window.open(url, '_blank')
+  if (w) logExport('html', `${paper.value.title}-${part}.html`, 0)
+}
+
 function toggleAns(item) {
   showAns.value[item.id] = !showAns.value[item.id]
 }
@@ -50,7 +84,7 @@ onMounted(async () => {
   <template v-if="paper && isCanvas">
     <div class="btnrow" style="margin-bottom:12px">
       <a :href="`#/compose/canvas?id=${paper.id}`"><button class="primary">继续编排</button></a>
-      <a :href="`/api/papers/${paper.id}/export-canvas`"><button>下载 PDF</button></a>
+      <button @click="downloadPdf(`/api/papers/${paper.id}/export-canvas`, paper.title)">下载 PDF</button>
       <a href="#/compose/canvas"><button>新建一张</button></a>
       <a href="#/papers"><button>← 试卷列表</button></a>
     </div>
@@ -68,9 +102,10 @@ onMounted(async () => {
 
   <template v-else-if="paper">
     <div class="btnrow" style="margin-bottom:12px">
-      <a href="#/compose"><button>← 再组一卷</button></a>
-      <a :href="`/api/papers/${paper.id}/export`"><button class="primary">下载 PDF（题目卷+答案卷）</button></a>
-      <a :href="`/api/papers/${paper.id}/view`" target="_blank"><button>浏览器打印视图</button></a>
+      <a href="#/questions"><button>← 再组一卷</button></a>
+      <button class="primary" @click="openView('questions')">题目卷（可编辑/打印）</button>
+      <button @click="openView('answers')">答案卷（可编辑/打印）</button>
+      <a :href="`/api/papers/${paper.id}/view`" target="_blank"><button>题目+答案合卷</button></a>
       <a href="#/papers"><button>← 试卷列表</button></a>
     </div>
     <div class="card">
@@ -78,6 +113,8 @@ onMounted(async () => {
       <p class="muted" style="text-align:center">
         {{ paper.subject }} · 满分 {{ scoreSum }} 分 · 限时 {{ paper.duration_minutes }} 分钟
         <template v-if="paper.config && paper.config.source === 'manual'"> · 自选题目</template>
+        <template v-else-if="paper.config && paper.config.source === 'ai'"> · AI 命题（未进题库）</template>
+        <template v-else-if="paper.config && paper.config.source === 'merged'"> · 融合卷</template>
         <template v-else> · 范围：第 {{ paper.unit_from }}~{{ paper.unit_to }} 单元</template>
         <span v-if="paper.include_extension && !(paper.config && paper.config.source === 'manual')"> · 含提优拓展</span>
       </p>
@@ -106,7 +143,7 @@ onMounted(async () => {
         </div>
         <div class="btnrow" style="margin-top:6px">
           <button @click="toggleAns(it)">看答案</button>
-          <button @click="replace(it)">↻ 换一题</button>
+          <button v-if="it.question_id" @click="replace(it)">↻ 换一题</button>
         </div>
         <div v-if="showAns[it.id]" class="q-answer">
           <span class="cap">答案</span>{{ it.snapshot.answer }}

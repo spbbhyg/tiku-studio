@@ -3,13 +3,20 @@ import { onMounted, ref } from 'vue'
 import { api } from './api.js'
 
 const open = ref(false)
+const navOpen = ref(localStorage.getItem('tiku-nav-open') !== '0')
+function toggleNav() {
+  navOpen.value = !navOpen.value
+  localStorage.setItem('tiku-nav-open', navOpen.value ? '1' : '0')
+}
+
 const navs = [
   { path: '/', label: '首页' },
+  { path: '/v2/editor', label: '题组编辑 v2' },
   { path: '/author', label: '出题' },
+  { path: '/reader', label: '精读' },
+  { path: '/smart', label: '智能出题' },
   { path: '/questions', label: '题库' },
-  { path: '/compose', label: '组卷' },
   { path: '/papers', label: '试卷' },
-  { path: '/books', label: '资料库' },
   { path: '/quizforge', label: 'QF题库' },
   { path: '/settings', label: '设置' },
 ]
@@ -26,12 +33,19 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="layout">
-    <aside class="sidebar" :class="{ open }" @click="open = false">
-      <div class="logo">tiku-studio<small>题库 · 对纲 · 组卷</small></div>
+  <div class="layout" :class="{ narrow: !navOpen }">
+    <aside class="sidebar" :class="{ open, collapsed: !navOpen }" @click="open = false">
+      <div class="logo">
+        <span class="wordmark">tiku-studio<small>题库 · 对纲 · 组卷</small></span>
+        <button class="fold" :title="navOpen ? '收起导航' : '展开导航'" @click.stop="toggleNav">
+          {{ navOpen ? '«' : '»' }}
+        </button>
+      </div>
       <nav class="nav">
         <template v-for="n in navs" :key="n.path">
-          <router-link :to="n.path">{{ n.label }}</router-link>
+          <router-link :to="n.path" :title="n.label">
+            <span class="ic">{{ n.label.slice(0, 1) }}</span><span class="lbl">{{ n.label }}</span>
+          </router-link>
           <div v-if="n.path === '/quizforge' && qfBanks.length" class="subnav">
             <router-link v-for="b in qfBanks" :key="b.id"
                          :to="{ path: '/quizforge', query: { bank: b.id } }"
@@ -53,6 +67,21 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.logo { display: flex; align-items: flex-start; gap: 6px; }
+.wordmark { flex: 1; min-width: 0; }
+.fold {
+  border: 1px solid #e4e7ec; background: #fff; color: #667085; cursor: pointer;
+  width: 22px; height: 22px; border-radius: 6px; line-height: 1; font-size: 12px;
+  display: flex; align-items: center; justify-content: center; flex: none;
+}
+.fold:hover { color: var(--brand); border-color: var(--brand); }
+.nav a .ic { display: none; }
+.collapsed .wordmark, .collapsed .subnav { display: none; }
+.collapsed .logo { justify-content: center; }
+.collapsed .nav a { justify-content: center; padding-left: 0; padding-right: 0; }
+.collapsed .nav a .lbl { display: none; }
+.collapsed .nav a .ic { display: inline-block; font-size: 13px; font-weight: 600; }
+
 .subnav {
   display: flex; flex-direction: column; gap: 2px;
   margin: 2px 0 6px 10px; padding-left: 8px; border-left: 2px solid #eef1f6;

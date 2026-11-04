@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import re
 import shutil
 import uuid
@@ -41,6 +42,21 @@ def _rel(path: Path) -> str:
     return path.relative_to(LIBRARY_DIR).as_posix()
 
 
+def _clean_filename(name: str | None) -> str:
+    """浏览器/curl 传上来的中文名常被按 latin-1 解码，这里尽量还原成 GBK/UTF-8。"""
+    raw = (name or "").strip()
+    if not raw:
+        return ""
+    for enc in ("gbk", "utf-8"):
+        try:
+            fixed = raw.encode("latin-1").decode(enc)
+            if fixed and not any("\ufffd" == ch for ch in fixed):
+                return fixed
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            continue
+    return raw
+
+
 def _doc_file(doc_id: str) -> Path:
     if not DOC_ID_RE.match(doc_id or ""):
         raise HTTPException(400, "非法 doc_id")
@@ -48,6 +64,31 @@ def _doc_file(doc_id: str) -> Path:
     if not path.exists():
         raise HTTPException(404, "文档不存在或已被清理，请重新上传")
     return path
+
+
+def _meta_path(doc_id: str) -> Path:
+    return UPLOAD_DIR / f"{doc_id}.json"
+
+
+def _read_meta(doc_id: str) -> dict:
+    """上传时的文件名/页数等信息。老文件没有 sidecar 也能用。"""
+    try:
+        data = json.loads(_meta_path(doc_id).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:                                        # noqa: BLE001
+        return {}
+
+
+def _write_meta(doc_id: str, filename: str, page_count: int) -> None:
+    try:
+        _meta_path(doc_id).write_text(json.dumps({
+            "doc_id": doc_id,
+            "filename": filename,
+            "page_count": page_count,
+            "uploaded_at": datetime.now().isoformat(timespec="seconds"),
+        }, ensure_ascii=False), encoding="utf-8")
+    except Exception:                                        # noqa: BLE001
+        pass
 
 
 def _save_png(data: bytes, subdir: str = "questions") -> dict:
@@ -108,10 +149,42 @@ async def upload_doc(file: UploadFile = File(...)):
             pages.append({"page_no": i + 1,
                           "width": round(page.rect.width, 1),
                           "height": round(page.rect.height, 1)})
-    return {"doc_id": doc_id, "filename": file.filename or "未命名.pdf",
+    filename = _clean_filename(file.filename) or "未命名.pdf"
+    _write_meta(doc_id, filename, len(pages))
+    return {"doc_id": doc_id, "filename": filename,
             "page_count": len(pages),
             "url": f"/api/manual/doc/{doc_id}/page/1.png?zoom=2",
             "pages": pages}
+
+
+@router.get("/docs")
+def list_docs():
+    """已上传的 PDF 列表（刷新页面后还能接着用）。"""
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    out = []
+    for pdf in UPLOAD_DIR.glob("*.pdf"):
+        doc_id = pdf.stem
+        if not DOC_ID_RE.match(doc_id):
+            continue
+        meta = _read_meta(doc_id)
+        count = int(meta.get("page_count") or 0)
+        if not count:
+            try:
+                with fitz.open(str(pdf)) as doc:
+                    count = len(doc)
+            except Exception:                                # noqa: BLE001
+                count = 0
+        stat = pdf.stat()
+        out.append({
+            "doc_id": doc_id,
+            "filename": meta.get("filename") or f"{doc_id}.pdf",
+            "page_count": count,
+            "bytes": stat.st_size,
+            "uploaded_at": meta.get("uploaded_at") or datetime.fromtimestamp(
+                stat.st_mtime).isoformat(timespec="seconds"),
+        })
+    out.sort(key=lambda d: d.get("uploaded_at") or "", reverse=True)
+    return {"docs": out}
 
 
 # ---------------------------------------------------------------- 页图
@@ -137,12 +210,154 @@ def page_image(doc_id: str, page_no: int, zoom: float = 2.0):
                         headers={"Cache-Control": "private, max-age=600"})
 
 
+# ---------------------------------------------------------------- 文字层
+def _page_lines(page: fitz.Page) -> list[dict]:
+    """把一页的文字按「行」拆出来，坐标归一化到 0~1，供前端做原生选区。"""
+    rect = page.rect
+    w = float(rect.width) or 1.0
+    h = float(rect.height) or 1.0
+    try:
+        raw = page.get_text("dict")
+    except Exception:                                        # noqa: BLE001
+        return []
+    out: list[dict] = []
+    for block in raw.get("blocks", []):
+        if block.get("type") != 0:                           # 0 = 文本块，1 = 图片
+            continue
+        for line in block.get("lines", []):
+            spans = line.get("spans") or []
+            text = "".join(str(s.get("text") or "") for s in spans)
+            if not text.strip():
+                continue
+            try:
+                x0, y0, x1, y1 = [float(v) for v in line.get("bbox") or []]
+            except Exception:                                # noqa: BLE001
+                continue
+            if x1 <= x0 or y1 <= y0:
+                continue
+            size = max((float(s.get("size") or 0) for s in spans), default=0.0)
+            out.append({
+                "text": text,
+                "x0": round(x0 / w, 5), "y0": round(y0 / h, 5),
+                "x1": round(min(x1, w) / w, 5), "y1": round(min(y1, h) / h, 5),
+                "size": round(size, 2),
+            })
+    return out
+
+
+@router.get("/doc/{doc_id}/page/{page_no}/text")
+def page_text(doc_id: str, page_no: int):
+    """某页的文字层（逐行 + 归一化坐标）。扫描版 PDF 会返回空列表。"""
+    path = _doc_file(doc_id)
+    with fitz.open(str(path)) as doc:
+        if not 1 <= page_no <= len(doc):
+            raise HTTPException(404, "页码超出文档范围")
+        page = doc.load_page(page_no - 1)
+        rect = page.rect
+        lines = _page_lines(page)
+    return {
+        "doc_id": doc_id, "page_no": page_no,
+        "width": round(float(rect.width), 1), "height": round(float(rect.height), 1),
+        "lines": lines,
+        "text": "\n".join(line["text"].strip() for line in lines),
+        "has_text": bool(lines),
+    }
+
+
+class ExtractTextIn(BaseModel):
+    doc_id: str
+    page_no: int = Field(ge=1)
+    # 归一化矩形列表（0~1）；前端把浏览器选区拆成若干行矩形发过来
+    rects: list[list[float]] = Field(default_factory=list, max_length=400)
+
+
+def _merge_line_rects(rects: list[list[float]]) -> list[list[float]]:
+    """把同一行的碎矩形合并，避免逐字/逐段提取时丢空格。"""
+    def norm(r):
+        x0, y0, x1, y1 = [float(v) for v in r[:4]]
+        x0, x1 = sorted((max(0.0, min(1.0, x0)), max(0.0, min(1.0, x1))))
+        y0, y1 = sorted((max(0.0, min(1.0, y0)), max(0.0, min(1.0, y1))))
+        return [x0, y0, x1, y1]
+
+    merged = [norm(r) for r in rects if len(r) >= 4]
+    for _ in range(3):
+        changed = False
+        out: list[list[float]] = []
+        for r in sorted(merged, key=lambda b: (b[1], b[0])):
+            for i, m in enumerate(out):
+                if r[3] <= m[1] or r[1] >= m[3]:             # 垂直不相交
+                    continue
+                overlap = min(r[3], m[3]) - max(r[1], m[1])
+                shorter = min(r[3] - r[1], m[3] - m[1]) or 1e-9
+                gap = max(r[0], m[0]) - min(r[2], m[2])
+                if overlap / shorter > 0.5 and gap < 0.02:   # 同一行且相邻
+                    out[i] = [min(r[0], m[0]), min(r[1], m[1]),
+                              max(r[2], m[2]), max(r[3], m[3])]
+                    changed = True
+                    break
+            else:
+                out.append(r)
+        merged = out
+        if not changed:
+            break
+    return merged
+
+
+def _snap_to_lines(lines: list[dict], rects: list[list[float]]) -> list[list[float]]:
+    """把浏览器给的碎矩形对齐到 PDF 的整行，避免只框到半行时丢词、丢空格。"""
+    out: list[list[float]] = []
+    for r in rects:
+        hit = []
+        rh = max(1e-9, r[3] - r[1])
+        for ln in lines:
+            oy = min(r[3], ln["y1"]) - max(r[1], ln["y0"])
+            if oy > 0 and oy / rh > 0.35:
+                hit.append(ln)
+        if hit:
+            out.append([min([r[0]] + [ln["x0"] for ln in hit]),
+                        min([r[1]] + [ln["y0"] for ln in hit]),
+                        max([r[2]] + [ln["x1"] for ln in hit]),
+                        max([r[3]] + [ln["y1"] for ln in hit])])
+        else:
+            out.append(r)
+    return out
+
+
+@router.post("/extract-text")
+def extract_text(body: ExtractTextIn):
+    """按选区矩形从 PDF 里取文字（复制/翻译用）。"""
+    path = _doc_file(body.doc_id)
+    if not body.rects:
+        return {"text": "", "rects": [], "chars": 0}
+    with fitz.open(str(path)) as doc:
+        if not 1 <= body.page_no <= len(doc):
+            raise HTTPException(404, "页码超出文档范围")
+        page = doc.load_page(body.page_no - 1)
+        w, h = float(page.rect.width), float(page.rect.height)
+        rects = _merge_line_rects(_snap_to_lines(_page_lines(page), body.rects))
+        parts: list[str] = []
+        for x0, y0, x1, y1 in rects:
+            clip = fitz.Rect(max(0.0, x0 * w - 0.6), max(0.0, y0 * h - 0.6),
+                             min(w, x1 * w + 0.6), min(h, y1 * h + 0.6))
+            try:
+                piece = page.get_text("text", clip=clip) or ""
+            except Exception:                                # noqa: BLE001
+                piece = ""
+            piece = "\n".join(line.rstrip() for line in piece.splitlines() if line.strip())
+            if piece:
+                parts.append(piece)
+    text = "\n".join(parts)
+    return {"text": text, "rects": rects, "chars": len(text)}
+
+
+
 # ---------------------------------------------------------------- 裁剪
 @router.delete("/doc/{doc_id}")
 def delete_doc(doc_id: str):
     """删除已上传的原件（连带页面渲染缓存）。已裁剪出的题图不受影响。"""
     path = _doc_file(doc_id)
     path.unlink()
+    _meta_path(doc_id).unlink(missing_ok=True)
     cache = PAGE_CACHE_DIR / doc_id
     if cache.exists():
         shutil.rmtree(cache, ignore_errors=True)

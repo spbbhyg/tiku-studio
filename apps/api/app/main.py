@@ -16,8 +16,10 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import WEB_DIST, ensure_dirs
 from .db import SessionLocal, init_db
-from .routers import (authoring, books, imports, inbox, manual, meta, paper_canvas, papers,
-                      questions, sets, settings as settings_router)
+from .routers import (workbench, wb_extra, ai as ai_router, authoring, books, imports, inbox, manual, meta,
+                      paper_canvas, papers, questions, sets, settings as settings_router,
+                      v2 as v2_router, reader,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("tiku-studio")
@@ -30,6 +32,8 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
 
 app.include_router(books.router)
+app.include_router(v2_router.router)
+app.include_router(reader.router)
 app.include_router(questions.router)
 app.include_router(papers.router)
 app.include_router(paper_canvas.router)
@@ -40,6 +44,9 @@ app.include_router(authoring.router)
 app.include_router(imports.router)
 app.include_router(sets.router)
 app.include_router(settings_router.router)
+app.include_router(workbench.router)
+app.include_router(wb_extra.router)
+app.include_router(ai_router.router)
 
 
 @app.on_event("startup")

@@ -100,6 +100,34 @@ class PaperGenerate(BaseModel):
     question_ids: list[int] = Field(default_factory=list, description="手动选题模式：按给定顺序组卷")
 
 
+class AiPaperIn(BaseModel):
+    source: str = ""
+    doc_id: Optional[str] = None
+    count: int = 5
+    title: Optional[str] = None
+    subject: str = "化学"
+    grade: int = 12
+    semester: str = "全"
+    duration_minutes: int = 90
+    q_type: str = ""
+    difficulty: int = 0
+
+
+class MergePapersIn(BaseModel):
+    paper_ids: list[int] = Field(min_length=2)
+    title: Optional[str] = None
+
+
+class AiPaperBuildIn(BaseModel):
+    """分步出题结束后，把逐题快照一次建成试卷。"""
+    items: list[dict[str, Any]] = Field(min_length=1)
+    title: Optional[str] = None
+    subject: str = "化学"
+    grade: int = 12
+    semester: str = "全"
+    duration_minutes: int = 90
+
+
 class PaperQuestionOut(BaseModel):
     id: int
     seq: int

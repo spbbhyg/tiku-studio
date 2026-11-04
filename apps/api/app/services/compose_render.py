@@ -108,7 +108,61 @@ def _hex_color(value, default=(0.06, 0.07, 0.09)):
         return default
 
 
+def _draw_styled_text(page: pymupdf.Page, block: dict) -> float:
+    """逐字符绘制带 runs 的文字块（每个字可单独字号/颜色）。
+
+    runs 形如 ``[{"t": "abc", "s": 14, "c": "#ff0000"}]``；没有 s/c 的段落继承块级设置。
+    """
+    size = max(6.0, min(48.0, float(block.get("size") or 12)))
+    x = max(0.0, min(PAGE_W - 24, float(block.get("x") or 48)))
+    y = float(block.get("y") or 48)
+    width = max(60.0, min(PAGE_W - 2 * x, float(block.get("w") or (PAGE_W - 2 * x))))
+    line = float(block.get("line") or 1.55)
+    bold = bool(block.get("bold"))
+    font_name = "cnb" if bold else "cn"
+    font = pymupdf.Font(fontfile=str(FONT_B if bold else FONT))
+    base_color = _hex_color(block.get("color"))
+
+    cx = x
+    base = y + size * 0.98
+    line_max = size
+    bottom = base
+
+    def newline() -> None:
+        nonlocal cx, base, line_max, bottom
+        base += line_max * line
+        cx = x
+        line_max = size
+        bottom = max(bottom, base)
+
+    for run in block.get("runs") or []:
+        if not isinstance(run, dict):
+            continue
+        try:
+            rs = float(run.get("s") or size)
+        except (TypeError, ValueError):
+            rs = size
+        rs = max(6.0, min(48.0, rs))
+        color = _hex_color(run.get("c") or block.get("color"), base_color)
+        for ch in str(run.get("t") or ""):
+            if ch == "\n":
+                newline()
+                continue
+            cw = font.text_length(ch, fontsize=rs)
+            if cx + cw > x + width and cx > x:
+                newline()
+            page.insert_text((cx, base), ch, fontname=font_name, fontsize=rs, color=color)
+            cx += cw
+            line_max = max(line_max, rs)
+            bottom = max(bottom, base)
+    return bottom + max(0.0, line_max - size) * 0.4 + 2
+
+
 def _draw_text(page: pymupdf.Page, block: dict) -> float:
+    runs = block.get("runs")
+    if isinstance(runs, list) and any(isinstance(r, dict) and str(r.get("t") or "")
+                                      for r in runs):
+        return _draw_styled_text(page, block)
     size = float(block.get("size") or 12)
     size = max(6.0, min(48.0, size))
     x = float(block.get("x") or 48)

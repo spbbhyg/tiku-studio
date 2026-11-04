@@ -8,6 +8,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api.js'
+import Extract from './Extract.vue'
 import { renderMath, stripMath } from '../math.js'
 
 const router = useRouter()
@@ -37,6 +38,139 @@ function toggleSide() {
 const f = reactive({ q: '', q_type: '', difficulty: '', status: '' })
 
 const sel = ref(new Set())
+
+// ---------- 排序：加入顺序 / 难易 / 手动 ----------
+const LS_SORT = 'tiku-bank-sort'
+const sortMode = ref(localStorage.getItem(LS_SORT) || 'added_desc')
+function setSort(v) {
+  sortMode.value = v
+  localStorage.setItem(LS_SORT, v)
+  page.value = 1
+  load()
+}
+
+// ---------- 分类维度（在设置里自定义） ----------
+const dims = ref([])
+async function loadDims() {
+  try { const d = await api.get('/api/wb/categories'); dims.value = d.dims || [] } catch { dims.value = [] }
+}
+
+// ---------- 试题篮 ----------
+const LS_BASKET = 'tiku-basket-v1'
+const basket = ref([])
+const basketOpen = ref(localStorage.getItem('tiku-basket-open') === '1')
+const basketTitle = ref('')
+
+// 错题集
+const moreOpen = ref(false)
+const showExtract = ref(false)
+const wrongBooks = ref([])
+const wrongPick = ref(null)        // 正在加题的目标题 id
+const wrongName = ref('')
+async function loadWrongBooks() {
+  try { const d = await api.get('/api/wb/wrongbooks'); wrongBooks.value = d.books || d || [] } catch { /* 忽略 */ }
+}
+function openWrong(q) { wrongPick.value = q.id; wrongName.value = ''; loadWrongBooks() }
+async function addWrong(bid) {
+  if (!wrongPick.value) return
+  try {
+    await api.post(`/api/wb/wrongbooks/${bid}/items`, { question_ids: [wrongPick.value] })
+    msg.value = '已加入错题集'
+    wrongPick.value = null
+    loadWrongBooks()
+  } catch (e) { err.value = e.message }
+}
+async function createWrongAndAdd() {
+  const n = wrongName.value.trim()
+  if (!n) return
+  try {
+    let bid = null
+    try {
+      const b = await api.post('/api/wb/wrongbooks', { name: n, note: '' })
+      bid = b.id
+    } catch {
+      const d = await api.get('/api/wb/wrongbooks')
+      const hit = (d.books || []).find((x) => x.name === n)
+      if (!hit) throw new Error('同名错题集已存在，但取不到它的 id')
+      bid = hit.id
+    }
+    await addWrong(bid)
+  } catch (e) { err.value = e.message }
+}
+const basketBusy = ref(false)
+function saveBasket() { localStorage.setItem(LS_BASKET, JSON.stringify(basket.value)) }
+function loadBasket() {
+  try { basket.value = JSON.parse(localStorage.getItem(LS_BASKET) || '[]') } catch { basket.value = [] }
+}
+function toggleBasket() {
+  basketOpen.value = !basketOpen.value
+  localStorage.setItem('tiku-basket-open', basketOpen.value ? '1' : '0')
+}
+function inBasket(id) { return basket.value.some(x => x.id === id) }
+function addToBasket(q) {
+  if (!q || inBasket(q.id)) return
+  const base = q.q_type === '选择' ? 2 : (q.q_type === '计算' ? 10 : 6)
+  basket.value.push({ id: q.id, stem: q.stem, q_type: q.q_type, difficulty: q.difficulty,
+    score: base, align: 'left', font_size: 0, color: '' })
+  basketOpen.value = true
+  saveBasket()
+}
+function removeFromBasket(id) { basket.value = basket.value.filter(x => x.id !== id); saveBasket() }
+function moveInBasket(i, d) {
+  const j = i + d
+  if (j < 0 || j >= basket.value.length) return
+  const a = basket.value
+  const t = a[i]; a[i] = a[j]; a[j] = t
+  saveBasket()
+}
+function clearBasket() { basket.value = []; saveBasket() }
+const basketTotal = computed(() => basket.value.reduce((s, x) => s + Number(x.score || 0), 0))
+async function makePaper() {
+  if (!basket.value.length) return
+  basketBusy.value = true
+  try {
+    const r = await api.post('/api/wb/papers', {
+      title: basketTitle.value,
+      duration_minutes: 90,
+      items: basket.value.map(x => ({ question_id: x.id, score: x.score,
+        align: x.align, font_size: x.font_size, color: x.color })),
+    })
+    clearBasket()
+    router.push(`/papers/${r.id}`)
+  } catch (e) {
+    err.value = e.message
+  } finally { basketBusy.value = false }
+}
+
+// ---------- 拖拽 ----------
+const dragQid = ref(0)
+const manualDragId = ref(0)
+function onCardDragStart(q, e) {
+  dragQid.value = q.id
+  manualDragId.value = q.id
+  e.dataTransfer.setData('text/plain', String(q.id))
+  e.dataTransfer.effectAllowed = 'copyMove'
+}
+function onBasketDrop(e) {
+  e.preventDefault()
+  const id = Number(e.dataTransfer.getData('text/plain') || dragQid.value)
+  const q = items.value.find(x => x.id === id)
+  if (q) addToBasket(q)
+}
+async function onCardDrop(target, e) {
+  if (sortMode.value !== 'manual') { onBasketDrop(e); return }
+  e.preventDefault()
+  const from = manualDragId.value
+  if (!from || from === target.id) return
+  const ids = items.value.map(x => x.id)
+  const a = ids.indexOf(from), b = ids.indexOf(target.id)
+  if (a < 0 || b < 0) return
+  ids.splice(b, 0, ids.splice(a, 1)[0])
+  const map = new Map(items.value.map(x => [x.id, x]))
+  items.value = ids.map(id => map.get(id))
+  try { await api.post('/api/wb/questions/reorder', { ids }) } catch (err2) { err.value = err2.message }
+}
+
 const openAnswers = ref(new Set())
 const zoomImg = ref('')
 
@@ -53,6 +187,7 @@ const vers = ref(null)            // { q, items, busy }
 
 const showImport = ref(false)
 const qf = reactive({ found: false, db_path: '', banks: [], hint: '', busy: '', result: null, picked: [] })
+const paperImp = reactive({ busy: false, title: '', result: null, err: '' })
 
 const topicTags = computed(() => {
   const g = topicGroups.value.find((x) => x.group === '专题')
@@ -97,6 +232,7 @@ async function load() {
     if (f.status) p.set('status', f.status)
     if (activeTag.value) p.set('tag', activeTag.value)
     if (activeSet.value) p.set('set_id', activeSet.value === 'unfiled' ? '-1' : activeSet.value)
+    p.set('sort', sortMode.value)
     const data = await api.get('/api/questions?' + p.toString())
     items.value = data.items || []
     total.value = data.total || 0
@@ -221,9 +357,152 @@ function fmtTime(t) {
   return String(t).replace('T', ' ').slice(0, 16)
 }
 
-function goCompose() {
-  if (!sel.value.size) return
-  router.push({ path: '/compose', query: { ids: selList.value.join(',') } })
+const showPaper = ref(false)
+const paperPool = ref([])
+const paperMeta = reactive({ title: '', duration_minutes: 120 })
+const paperScores = reactive({})
+const paperBusy = ref(false)
+const PAPER_SCORE = {
+  '单选': 3, '多选': 4, '判断': 2, '填空': 4, '名词解释': 5, '简答': 6,
+  '论述': 10, '计算': 8, '证明': 8, '案例分析': 10, '翻译': 5, '文献阅读': 10, '其他': 4,
+}
+const paperTypes = computed(() => [...new Set(paperPool.value.map((q) => q.q_type))])
+const paperTotal = computed(() =>
+  paperPool.value.reduce((sum, q) => sum + Number(paperScores[q.q_type] ?? PAPER_SCORE[q.q_type] ?? 4), 0))
+const paperStem = (q) => {
+  const t = stripMath(q.stem || '').replace(/\s+/g, ' ').trim()
+  return t ? (t.length > 48 ? t.slice(0, 48) + '…' : t) : '（题图题）'
+}
+
+async function openPaper() {
+  if (!selList.value.length) return
+  err.value = ''
+  paperBusy.value = true
+  try {
+    const data = await api.get(`/api/questions?ids=${selList.value.join(',')}&page_size=200`)
+    const map = new Map((data.items || []).map((q) => [q.id, q]))
+    paperPool.value = selList.value.map((id) => map.get(id)).filter(Boolean)
+    for (const t of new Set(paperPool.value.map((q) => q.q_type))) {
+      if (paperScores[t] == null) paperScores[t] = PAPER_SCORE[t] ?? 4
+    }
+    paperMeta.duration_minutes = Math.max(30, paperPool.value.length * 6)
+    paperMeta.title = `自组卷 · ${new Date().toLocaleDateString('zh-CN')}`
+    showPaper.value = true
+  } catch (e) { err.value = e.message } finally { paperBusy.value = false }
+}
+
+function movePaper(i, delta) {
+  const j = i + delta
+  if (j < 0 || j >= paperPool.value.length) return
+  const arr = paperPool.value.slice()
+  ;[arr[i], arr[j]] = [arr[j], arr[i]]
+  paperPool.value = arr
+}
+
+function removePaper(i) {
+  paperPool.value = paperPool.value.filter((_, k) => k !== i)
+}
+
+async function createPaper() {
+  if (!paperPool.value.length) { err.value = '还没有题'; return }
+  paperBusy.value = true
+  err.value = ''
+  try {
+    const perType = {}
+    for (const t of paperTypes.value) perType[t] = Number(paperScores[t] ?? PAPER_SCORE[t] ?? 4)
+    const p = await api.post('/api/papers', {
+      question_ids: paperPool.value.map((q) => q.id),
+      total_score: paperTotal.value,
+      duration_minutes: Number(paperMeta.duration_minutes) || 60,
+      per_type_score: perType,
+      title: paperMeta.title || undefined,
+    })
+    showPaper.value = false
+    router.push(`/papers/${p.id}`)
+  } catch (e) { err.value = e.message } finally { paperBusy.value = false }
+}
+
+/* 按教材自动组卷（原「组卷」页的自动模式，并入题库） */
+const showAuto = ref(false)
+const autoBusy = ref(false)
+const autoBooks = ref([])
+const autoBookId = ref(null)
+const autoUnits = ref([])
+const autoStats = ref({})
+const autoMeta = reactive({ title: '', duration_minutes: 120, unit_from: 1, unit_to: null, include_extension: false })
+const autoCounts = reactive({})
+const autoScores = reactive({})
+const autoTypes = computed(() => Object.keys(autoCounts))
+const autoTotal = computed(() => autoTypes.value.reduce(
+  (sum, t) => sum + Number(autoCounts[t] || 0) * Number(autoScores[t] || PAPER_SCORE[t] || 4), 0))
+
+async function openAuto() {
+  err.value = ''
+  showAuto.value = true
+  autoBusy.value = true
+  try {
+    autoBooks.value = await api.get('/api/books/textbooks')
+    if (!autoBooks.value.length) return
+    if (!autoBookId.value || !autoBooks.value.some((b) => b.id === autoBookId.value)) {
+      autoBookId.value = autoBooks.value[0].id
+    }
+    await loadAutoBook()
+  } catch (e) { err.value = e.message } finally { autoBusy.value = false }
+}
+
+async function loadAutoBook() {
+  if (!autoBookId.value) return
+  autoBusy.value = true
+  err.value = ''
+  try {
+    const [book, stats] = await Promise.all([
+      api.get(`/api/books/${autoBookId.value}`),
+      api.get(`/api/questions/type-stats?textbook_id=${autoBookId.value}`),
+    ])
+    autoUnits.value = book.units || []
+    autoStats.value = stats || {}
+    const maxSeq = autoUnits.value.length ? autoUnits.value[autoUnits.value.length - 1].seq : 1
+    autoMeta.unit_from = 1
+    autoMeta.unit_to = maxSeq
+    for (const k of Object.keys(autoCounts)) delete autoCounts[k]
+    for (const k of Object.keys(autoStats.value)) {
+      autoCounts[k] = 0
+      if (autoScores[k] == null) autoScores[k] = PAPER_SCORE[k] ?? 4
+    }
+    if (!Object.keys(autoCounts).length) {
+      for (const t of ['单选', '填空', '简答']) autoCounts[t] = 0
+    }
+    const b = autoBooks.value.find((x) => x.id === autoBookId.value)
+    autoMeta.title = `${b ? b.title + ' · ' : ''}自动组卷 ${new Date().toLocaleDateString('zh-CN')}`
+  } catch (e) { err.value = e.message } finally { autoBusy.value = false }
+}
+
+async function createAuto() {
+  const counts = {}
+  for (const t of autoTypes.value) {
+    const n = Number(autoCounts[t] || 0)
+    if (n > 0) counts[t] = n
+  }
+  if (!Object.keys(counts).length) { err.value = '至少给一种题型填数量'; return }
+  autoBusy.value = true
+  err.value = ''
+  try {
+    const perType = {}
+    for (const t of Object.keys(counts)) perType[t] = Number(autoScores[t] || PAPER_SCORE[t] || 4)
+    const p = await api.post('/api/papers', {
+      textbook_id: autoBookId.value,
+      unit_from: Number(autoMeta.unit_from) || 1,
+      unit_to: Number(autoMeta.unit_to) || undefined,
+      title: autoMeta.title || undefined,
+      total_score: autoTotal.value,
+      duration_minutes: Number(autoMeta.duration_minutes) || 60,
+      include_extension: !!autoMeta.include_extension,
+      counts,
+      per_type_score: perType,
+    })
+    showAuto.value = false
+    router.push(`/papers/${p.id}`)
+  } catch (e) { err.value = e.message } finally { autoBusy.value = false }
 }
 
 function download(name, blob) {
@@ -323,8 +602,58 @@ async function uploadDb(event) {
   event.target.value = ''
 }
 
+async function uploadPaper(event) {
+  const files = Array.from(event.target.files || [])
+  if (!files.length) return
+  paperImp.busy = true
+  paperImp.err = ''
+  paperImp.result = null
+  err.value = ''
+  const fd = new FormData()
+  for (const f of files) fd.append('files', f)
+  try {
+    const q = paperImp.title.trim() ? `?title=${encodeURIComponent(paperImp.title.trim())}` : ''
+    const data = await api.postForm(`/api/import/papers${q}`, fd)
+    paperImp.result = data
+    msg.value = `试卷「${data.title}」导入完成：新增 ${data.imported} 题，跳过重复 ${data.skipped} 题`
+    await Promise.all([load(), loadTopics(), loadSets()])
+  } catch (e) { paperImp.err = e.message } finally { paperImp.busy = false }
+  event.target.value = ''
+}
+
+function paperDrop(event) {
+  const files = Array.from(event.dataTransfer?.files || []).filter((f) => /\.pdf$/i.test(f.name))
+  if (!files.length) { paperImp.err = '请拖入 PDF 文件'; return }
+  uploadPaper({ target: { files } })
+}
+
+async function onExtracted(r) {
+  msg.value = `批量拆题完成：新增 ${r?.total ?? 0} 题（草稿），核对后确认即可`
+  await Promise.all([load(), loadTopics()])
+}
+
+async function deleteSelected() {
+  if (!selList.value.length) return
+  if (!window.confirm(`删除选中的 ${selList.value.length} 道题？删除后不可恢复。`)) return
+  err.value = ''
+  let done = 0
+  try {
+    for (const id of selList.value.slice()) {
+      await api.del(`/api/questions/${id}`)
+      done += 1
+    }
+    sel.value = new Set()
+    msg.value = `已删除 ${done} 道题`
+    await load()
+  } catch (e) { err.value = `已删除 ${done} 道题；继续删除时失败：${e.message}` }
+}
+
 onMounted(async () => {
-  await Promise.all([loadTopics(), loadQtypes(), loadSets()])
+  // 窄屏默认收起分类，先把题目露出来
+  const narrowInit = typeof window !== 'undefined' && window.innerWidth < 760
+  if (narrowInit) sideOpen.value = false
+  loadBasket()
+  await Promise.all([loadTopics(), loadQtypes(), loadSets(), loadDims()])
   // 支持 ?tag=QuizForge / ?tag=分析化学 这类直达筛选
   const t = String(route.query.tag || '').trim()
   if (t) activeTag.value = t
@@ -342,12 +671,23 @@ onMounted(async () => {
         <span class="muted">分类</span>
         <button class="ghost sm" title="收起分类" @click="toggleSide">«</button>
       </div>
-      <div class="sgroup">
+      <div class="sgroup" v-for="d in dims" :key="d.key">
+        <div class="shead">{{ d.name }}</div>
+        <button v-if="d.key === dims[0]?.key" class="sitem" :class="{ on: !activeTag }" @click="activeTag = ''; search()">
+          全部题目
+        </button>
+        <button v-for="v in d.values" :key="v.id" class="sitem"
+                :class="{ on: activeTag === v.name }" @click="pickTag(v.name)">{{ v.name }}</button>
+      </div>
+
+      <div class="sgroup" v-if="!dims.length && topicTags.length">
         <div class="shead">专题</div>
         <button class="sitem" :class="{ on: !activeTag }" @click="activeTag = ''; search()">全部题目</button>
         <button v-for="t in topicTags" :key="t.id" class="sitem"
                 :class="{ on: activeTag === t.name }" @click="pickTag(t.name)">{{ t.name }}</button>
       </div>
+
+      <p class="muted s-hint">分类项可在「设置 → 分类」里自己增删改名。</p>
       <div class="sgroup" v-if="sets.length || unfiled">
         <div class="shead">整卷</div>
         <button class="sitem" :class="{ on: !activeSet }" @click="activeSet = ''; search()">全部</button>
@@ -359,7 +699,34 @@ onMounted(async () => {
           {{ st.name }} <i>{{ st.count }}</i>
         </button>
       </div>
-    </aside>
+        </aside>
+
+      <div v-if="showExtract" class="xmask" @click.self="showExtract = false">
+        <div class="xcard">
+          <div class="xhead">
+            <h3>批量拆题</h3>
+            <button class="ghost sm" @click="showExtract = false">关闭</button>
+          </div>
+          <Extract embedded @done="onExtracted" />
+        </div>
+      </div>
+
+      <div v-if="wrongPick" class="modal-mask" @click.self="wrongPick = null">
+        <div class="modal">
+          <h3>加入错题集</h3>
+          <div class="wrow">
+            <input v-model="wrongName" placeholder="新建一本，如：电化学易错" @keyup.enter="createWrongAndAdd" />
+            <button class="primary sm" @click="createWrongAndAdd">新建并加入</button>
+          </div>
+          <p class="muted" v-if="!wrongBooks.length">还没有错题集，先在上面建一本。</p>
+          <div class="wlist" v-else>
+            <button v-for="b in wrongBooks" :key="b.id" class="ghost sm" @click="addWrong(b.id)">
+              {{ b.name }} <span class="muted">（{{ b.count }}）</span>
+            </button>
+          </div>
+          <div class="wfoot"><button class="ghost sm" @click="wrongPick = null">取消</button></div>
+        </div>
+      </div>
 
     <main class="bank-main">
 
@@ -369,10 +736,44 @@ onMounted(async () => {
       <button class="primary" @click="search">查询</button>
       <button @click="reset">重置</button>
       <span class="spacer"></span>
-      <button class="ghost" @click="openImport">⤓ 从 QuizForge 导入</button>
+      <button class="ghost" @click="showExtract = true">⤓ 批量拆题</button>
+    <div class="frow sortrow">
+      <label class="muted">排序</label>
+      <select :value="sortMode" @change="setSort($event.target.value)">
+        <option value="added_desc">加入顺序（新→旧）</option>
+        <option value="added_asc">加入顺序（旧→新）</option>
+        <option value="easy">由易到难</option>
+        <option value="hard">由难到易</option>
+        <option value="manual">手动排序（拖动卡片）</option>
+      </select>
+      <span v-if="sortMode === 'manual'" class="muted tiny">拖卡片可调顺序，松手即保存</span>
+      <button class="ghost" :class="{ primary: moreOpen || f.q_type || f.difficulty }" @click="moreOpen = !moreOpen">
+        筛选{{ (f.q_type ? 1 : 0) + (f.difficulty ? 1 : 0) ? ` · ${(f.q_type ? 1 : 0) + (f.difficulty ? 1 : 0)}` : '' }}
+      </button>
+      <span class="spacer"></span>
+      <button class="ghost" :class="{ primary: basketOpen }" @click="toggleBasket">
+        🧺 试题篮{{ basket.length ? ` · ${basket.length} 题` : '' }}
+      </button>
+    </div>
     </div>
 
 
+
+    <div class="frow filterrow" v-show="moreOpen">
+      <label class="muted">题型</label>
+      <select v-model="f.q_type" @change="search">
+        <option value="">全部题型</option>
+        <option v-for="t in qtypes" :key="t" :value="t">{{ t }}</option>
+      </select>
+      <label class="muted">难度</label>
+      <select v-model="f.difficulty" @change="search">
+        <option value="">全部难度</option>
+        <option :value="1">基础</option>
+        <option :value="2">中等</option>
+        <option :value="3">提优</option>
+      </select>
+      <button class="ghost sm" v-if="f.q_type || f.difficulty" @click="f.q_type = ''; f.difficulty = ''; search()">清除筛选</button>
+    </div>
 
     <div class="frow countrow">
       <span class="muted">共 {{ total }} 题<template v-if="activeTag"> · 专题「{{ activeTag }}」</template></span>
@@ -382,25 +783,75 @@ onMounted(async () => {
   <div v-if="err" class="errbox">{{ err }}</div>
   <div v-if="msg" class="okbox">{{ msg }}</div>
 
-  <div class="card selbar">
+  <div class="card selbar slim">
     <label class="chk"><input type="checkbox" :checked="allChecked" @change="toggleAll" /> 全选本页</label>
-    <span class="muted">已选 {{ selList.length }} 题</span>
-    <button class="ghost" :disabled="!selList.length" @click="clearSel">清空已选</button>
-    <button class="ghost" v-if="activeSet && activeSet !== 'unfiled'"
-            @click="selectWholeSet">整卷加入已选</button>
-    <button class="ghost" :disabled="!selList.length" @click="showSets = true">归入整卷…</button>
-    <button class="ghost" :disabled="!selList.length" @click="detachSelected">移出整卷</button>
+    <span class="muted" v-if="!selList.length">勾选题目后这里会出现批量操作</span>
+    <template v-else>
+      <span class="muted">已选 {{ selList.length }} 题</span>
+      <button class="ghost" @click="clearSel">清空</button>
+      <button class="ghost danger" @click="deleteSelected">删除所选</button>
+      <button class="ghost" v-if="activeSet && activeSet !== 'unfiled'" @click="selectWholeSet">整卷加入</button>
+      <button class="ghost" @click="showSets = true">归入整卷…</button>
+      <button class="ghost" @click="detachSelected">移出整卷</button>
+      <button @click="openPaper">用所选组卷 →</button>
+    </template>
     <span class="spacer"></span>
-    <button :disabled="!selList.length" @click="goCompose">用所选组卷 →</button>
-    <button class="primary" :disabled="!total" @click="showExport = true">
-      导出{{ selList.length ? `所选 ${selList.length} 题` : '全部（按筛选）' }}
-    </button>
+    <button class="ghost" :disabled="paperBusy" @click="openAuto">自动组卷</button>
+    <button class="ghost" :disabled="!total" @click="showExport = true">导出</button>
   </div>
 
   <div v-if="loading" class="muted">加载中…</div>
 
+  <div class="qwrap" :class="{ withb: basketOpen }">
+  <aside v-if="basketOpen" class="basket"
+         @dragover.prevent
+         @drop="onBasketDrop">
+    <div class="bhead">
+      <b>试题篮</b>
+      <span class="muted">{{ basket.length }} 题 · {{ basketTotal }} 分</span>
+      <span class="spacer"></span>
+      <button class="ghost sm" @click="toggleBasket">收起</button>
+    </div>
+    <p v-if="!basket.length" class="muted tiny">
+      把左边的题目卡片拖进来，或点题目上的「+ 试题篮」。
+    </p>
+    <div v-for="(b, i) in basket" :key="b.id" class="bitem">
+      <div class="brow1">
+        <span class="bno">{{ i + 1 }}</span>
+        <span class="bstem" :title="stripMath(b.stem)">{{ stripMath(b.stem) || '（图片题）' }}</span>
+        <button class="x" title="取出" @click="removeFromBasket(b.id)">×</button>
+      </div>
+      <div class="brow2">
+        <input class="bscore" type="number" min="0" step="1" v-model.number="b.score" @change="saveBasket" />
+        <span class="muted tiny">分</span>
+        <select v-model="b.align" class="bsel" @change="saveBasket" title="对齐">
+          <option value="left">左对齐</option>
+          <option value="center">居中</option>
+          <option value="right">右对齐</option>
+        </select>
+        <input class="bnum" type="number" min="0" max="24" step="0.5" v-model.number="b.font_size"
+               placeholder="字号" title="字号 pt（0=默认）" @change="saveBasket" />
+        <input class="bcolor" type="color" v-model="b.color" title="文字颜色" @change="saveBasket" />
+        <span class="spacer"></span>
+        <button class="ghost sm" @click="moveInBasket(i, -1)">↑</button>
+        <button class="ghost sm" @click="moveInBasket(i, 1)">↓</button>
+      </div>
+    </div>
+    <div class="bfoot">
+      <input v-model="basketTitle" placeholder="卷名（可空）" />
+      <button class="primary sm" :disabled="!basket.length || basketBusy" @click="makePaper">
+        {{ basketBusy ? '生成中…' : `生成试卷（${basket.length} 题 · ${basketTotal} 分）` }}
+      </button>
+      <button class="ghost sm" :disabled="!basket.length" @click="clearBasket">清空</button>
+    </div>
+  </aside>
+
   <div class="qgrid">
-    <article v-for="q in items" :key="q.id" class="qcard" :class="{ picked: sel.has(q.id) }">
+    <article v-for="q in items" :key="q.id" class="qcard" :class="{ picked: sel.has(q.id) }"
+             draggable="true"
+             @dragstart="onCardDragStart(q, $event)"
+             @dragover.prevent
+             @drop="onCardDrop(q, $event)">
       <div class="q-left">
         <input type="checkbox" :checked="sel.has(q.id)" @change="toggleSel(q.id)" />
         <span class="no">#{{ q.id }}</span>
@@ -439,6 +890,10 @@ onMounted(async () => {
             {{ openAnswers.has(q.id) ? '收起答案' : '查看参考答案' }}
           </button>
           <button class="ghost sm" @click="trimBlank(q)" title="按版面重渲染，裁掉下方空白">裁空白</button>
+        <button class="ghost sm" :disabled="inBasket(q.id)" @click="addToBasket(q)">
+          {{ inBasket(q.id) ? '已在篮中' : '+ 试题篮' }}
+        </button>
+        <button class="ghost sm" @click="openWrong(q)">+ 错题集</button>
         <button class="ghost sm" @click="openVersions(q)">历史</button>
           <router-link class="ghost sm" :to="{ path: '/author', query: { id: q.id } }">编辑</router-link>
           <button class="ghost sm danger" @click="deleteOne(q.id)">删除</button>
@@ -449,6 +904,7 @@ onMounted(async () => {
         </div>
       </div>
     </article>
+  </div>
   </div>
 
   <p v-if="!loading && !items.length" class="muted" style="padding:18px 0">
@@ -493,6 +949,107 @@ onMounted(async () => {
         <button class="ghost" @click="showExport = false">取消</button>
       </div>
       <p class="muted" style="font-size:12px">公式会渲染成清晰的小图嵌入文档；PDF 用等线排版，可直接打印。</p>
+    </div>
+  </div>
+
+  <!-- 组卷（原「组卷」页并入题库） -->
+  <div v-if="showPaper" class="modal" @click.self="showPaper = false">
+    <div class="modal-card" style="max-width:760px">
+      <h3>用所选 {{ paperPool.length }} 题组卷</h3>
+      <p class="muted" style="font-size:12.5px">
+        按下面的顺序出卷；可上下调整顺序、移除某题，分值按题型统一设置。生成后会打开试卷预览。
+      </p>
+      <label class="f"><span>卷名</span><input v-model="paperMeta.title" /></label>
+      <div class="frow" style="margin:8px 0 10px">
+        <label class="f" style="flex:0 0 160px"><span>考试时长（分钟）</span>
+          <input v-model.number="paperMeta.duration_minutes" type="number" min="10" />
+        </label>
+        <span class="chip brand" style="align-self:flex-end;margin-bottom:2px">合计 {{ paperTotal }} 分</span>
+      </div>
+      <div style="max-height:300px;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:6px 8px">
+        <div v-for="(q, i) in paperPool" :key="q.id"
+             style="display:flex;align-items:center;gap:8px;padding:6px 2px;border-bottom:1px dashed var(--line)">
+          <span class="muted" style="width:22px;text-align:right">{{ i + 1 }}</span>
+          <span class="chip sm2">{{ q.q_type }}</span>
+          <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ paperStem(q) }}</span>
+          <button class="ghost sm" title="上移" @click="movePaper(i, -1)">↑</button>
+          <button class="ghost sm" title="下移" @click="movePaper(i, 1)">↓</button>
+          <button class="ghost sm danger" @click="removePaper(i)">移除</button>
+        </div>
+        <p v-if="!paperPool.length" class="muted" style="padding:12px 2px">题目都被移除了，关闭后重新勾选。</p>
+      </div>
+      <div class="frow" style="margin-top:12px;flex-wrap:wrap;gap:8px 14px">
+        <span class="muted">每题分值：</span>
+        <label v-for="t in paperTypes" :key="t" style="display:flex;align-items:center;gap:6px">
+          <span class="chip sm2">{{ t }}</span>
+          <input v-model.number="paperScores[t]" type="number" min="0" style="width:64px" />
+        </label>
+      </div>
+      <div class="btnrow" style="margin-top:14px">
+        <button class="primary" :disabled="paperBusy || !paperPool.length" @click="createPaper">
+          {{ paperBusy ? '生成中…' : `生成试卷（${paperPool.length} 题 · ${paperTotal} 分）` }}
+        </button>
+        <button class="ghost" @click="showPaper = false">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 自动组卷（原「组卷」页的自动模式） -->
+  <div v-if="showAuto" class="modal" @click.self="showAuto = false">
+    <div class="modal-card" style="max-width:760px">
+      <h3>按教材自动组卷</h3>
+      <p class="muted" style="font-size:12.5px">
+        选课本纲和单元范围，按题型填需要的数量，系统从已确认题里抽题。题干相同的题会去重。
+      </p>
+      <p v-if="!autoBooks.length" class="muted" style="padding:10px 0">
+        还没有导入「课本纲」。先到「资料库」导入一本课本（role=textbook），再回来自动组卷；
+        也可以直接勾选题目用「用所选组卷」。
+      </p>
+      <template v-else>
+        <label class="f"><span>课本纲</span>
+          <select v-model.number="autoBookId" @change="loadAutoBook">
+            <option v-for="b in autoBooks" :key="b.id" :value="b.id">
+              {{ b.title }}（{{ b.subject }} · {{ b.grade }} 年级 · {{ b.semester }}）
+            </option>
+          </select>
+        </label>
+        <div class="frow" style="margin:10px 0;flex-wrap:wrap;gap:8px 14px">
+          <label class="f" style="flex:0 0 170px"><span>起始单元</span>
+            <select v-model.number="autoMeta.unit_from">
+              <option v-for="u in autoUnits" :key="u.id" :value="u.seq">{{ u.seq }} · {{ u.name }}</option>
+            </select>
+          </label>
+          <label class="f" style="flex:0 0 170px"><span>结束单元</span>
+            <select v-model.number="autoMeta.unit_to">
+              <option v-for="u in autoUnits" :key="u.id" :value="u.seq">{{ u.seq }} · {{ u.name }}</option>
+            </select>
+          </label>
+          <label class="f" style="flex:0 0 120px"><span>时长（分钟）</span>
+            <input v-model.number="autoMeta.duration_minutes" type="number" min="10" />
+          </label>
+          <label class="chk" style="align-self:flex-end;margin-bottom:8px">
+            <input v-model="autoMeta.include_extension" type="checkbox" /> 包含提优题
+          </label>
+        </div>
+        <label class="f"><span>卷名</span><input v-model="autoMeta.title" /></label>
+        <div class="frow" style="margin:10px 0;flex-wrap:wrap;gap:8px 14px">
+          <span class="muted">按题型抽题：</span>
+          <label v-for="t in autoTypes" :key="t" style="display:flex;align-items:center;gap:6px">
+            <span class="chip sm2">{{ t }}</span>
+            <input v-model.number="autoCounts[t]" type="number" min="0" style="width:64px" title="数量" />
+            <span class="muted" style="font-size:12px">可用 {{ autoStats[t] || 0 }}</span>
+            <input v-model.number="autoScores[t]" type="number" min="1" style="width:56px" title="每题分值" />
+            <span class="muted" style="font-size:12px">分/题</span>
+          </label>
+        </div>
+        <div class="btnrow" style="margin-top:14px">
+          <span class="chip brand">合计 {{ autoTotal }} 分</span>
+          <button class="primary" :disabled="autoBusy || !autoTotal" @click="createAuto">
+            {{ autoBusy ? '生成中…' : '生成自动组卷' }}
+          </button>
+          <button class="ghost" @click="showAuto = false">取消</button>
+        </div>
+      </template>
     </div>
   </div>
 
@@ -549,7 +1106,7 @@ onMounted(async () => {
   <!-- QuizForge 导入 -->
   <div v-if="showImport" class="modal" @click.self="showImport = false">
     <div class="modal-card">
-      <h3>从 QuizForge 导入题库</h3>
+      <h3>导入题目 / 试卷</h3>
       <p class="muted" style="font-size:12.5px">
         内置适配器会把 QuizForge 的「题库 → 题目」映射成这里的「书册 → 题目」，
         题型、选项、答案、解析、页码一并带过来；重复导入只补全空字段，不会重复建题。
@@ -579,11 +1136,62 @@ onMounted(async () => {
         新增 {{ qf.result.questions_created }} 题，补全 {{ qf.result.questions_updated }} 题，
         新建书册 {{ qf.result.books_created }} 个
       </div>
+
+      <hr style="margin:16px 0;border:none;border-top:1px solid var(--line)" />
+      <h3 style="font-size:15px">或导入整张试卷（PDF，可多份）</h3>
+      <p class="muted" style="font-size:12.5px">
+        可一次选「题目卷 + 答案卷」两份（最多 8 份），系统逐页取文字（扫描页自动 OCR），
+        交给 AI 按题号把题目和答案配对、拆题并归类。中文文件名可以直接选。
+      </p>
+      <div class="btnrow">
+        <input v-model="paperImp.title" placeholder="试卷名称（可空，默认用文件名）" style="max-width:240px" />
+      </div>
+      <div class="pdftray" :class="{ hot: paperImp.busy }" @dragover.prevent @drop.prevent="paperDrop">
+        <label class="upload sm-upload">
+          <input type="file" accept=".pdf,application/pdf" multiple @change="uploadPaper" />
+          <span>{{ paperImp.busy ? '识别/拆题中（可能需要 1-2 分钟）…' : '选择 PDF，或把题目卷/答案卷拖到这里' }}</span>
+        </label>
+        <span class="muted">支持多份：题目卷和答案卷可以分开；也可只传题目+答案合卷。</span>
+      </div>
+      <div v-if="paperImp.err" class="errbox">{{ paperImp.err }}</div>
+      <div v-if="paperImp.result" class="okbox">
+        已导入「{{ paperImp.result.title }}」：新增 {{ paperImp.result.imported }} 题，跳过重复
+        {{ paperImp.result.skipped }} 题；归类专题：{{ (paperImp.result.tags || []).join('、') || '未识别' }}
+        <template v-if="paperImp.result.files">（{{ paperImp.result.files.join(' + ') }}）</template>
+      </div>
     </div>
   </div>
 </template>
 
 <style scoped>
+.sortrow { gap: 8px; align-items: center; }
+.sortrow select { width: auto; min-width: 168px; }
+.qcard[draggable="true"] { cursor: grab; }
+.qwrap { display: block; }
+.qwrap.withb { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 12px; align-items: start; }
+.qwrap.withb > .qgrid { grid-column: 1; grid-row: 1; }
+.qwrap.withb > .basket { grid-column: 2; grid-row: 1; }
+.basket {
+  position: sticky; top: 12px; background: #fff; border: 1px solid #dbe3ef;
+  border-radius: 12px; box-shadow: 0 8px 24px rgba(15, 23, 42, .08);
+  padding: 10px 12px; max-height: calc(100vh - 120px); overflow: auto;
+}
+.bhead, .brow1, .brow2, .bfoot { display: flex; align-items: center; gap: 6px; }
+.bhead { margin-bottom: 8px; }
+.bitem { border: 1px solid #eef1f6; border-radius: 8px; padding: 6px; margin-bottom: 6px; background: #fbfcfe; }
+.brow1 { gap: 6px; }
+.bno { width: 18px; height: 18px; border-radius: 50%; background: #eef3ff; color: #2f6fed;
+  font-size: 11.5px; display: inline-flex; align-items: center; justify-content: center; }
+.bstem { flex: 1; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bitem .x { border: 0; background: transparent; cursor: pointer; color: #98a2b3; font-size: 15px; }
+.brow2 { margin-top: 4px; gap: 4px; flex-wrap: wrap; }
+.bscore { width: 54px; }
+.bnum { width: 64px; }
+.bsel { width: 84px; font-size: 12px; }
+.bcolor { width: 28px; height: 24px; padding: 0; border: 1px solid #d1d5db; border-radius: 6px; }
+.bfoot { margin-top: 8px; gap: 6px; }
+.bfoot input { flex: 1; }
+.tiny { font-size: 11.5px; }
 .q-toolbar { display: flex; flex-direction: column; gap: 10px; }
 .searchrow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .searchrow .search { flex: 1 1 320px; min-width: 240px; }
@@ -594,6 +1202,8 @@ onMounted(async () => {
 .frow { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .frow select { width: auto; min-width: 120px; }
 
+.filterrow { padding: 2px 0 4px; }
+.selbar.slim { padding: 6px 10px; }
 .selbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 10px 0; }
 .chk { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
 
@@ -629,6 +1239,17 @@ onMounted(async () => {
 .qopts { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13.5px; color: #374151; margin: 4px 0; }
 .q-tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 4px; }
 .q-tags .chip { cursor: pointer; }
+.xmask { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: flex; align-items: center; justify-content: center; z-index: 75; }
+.xcard { width: min(920px, 92vw); max-height: 88vh; overflow: auto; background: #fff; border-radius: 12px; padding: 14px 18px; box-shadow: 0 18px 50px rgba(15,23,42,.25); }
+.xhead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.xhead h3 { margin: 0; font-size: 15px; }
+.modal-mask { position: fixed; inset: 0; background: rgba(17,24,39,.35); display: flex; align-items: center; justify-content: center; z-index: 60; }
+.modal { background: #fff; border-radius: 12px; padding: 16px 18px; width: min(480px, 92vw); box-shadow: 0 20px 50px rgba(0,0,0,.2); }
+.modal h3 { margin: 0 0 10px; font-size: 15px; }
+.wrow { display: flex; gap: 8px; }
+.wrow input { flex: 1; }
+.wlist { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.wfoot { display: flex; justify-content: flex-end; }
 .q-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; align-items: center; }
 .q-actions .sm { padding: 5px 11px; font-size: 12.5px; }
 .q-actions .ghost { text-decoration: none; }
@@ -693,6 +1314,7 @@ onMounted(async () => {
   position: sticky; top: 16px; display: flex; flex-direction: column; gap: 14px;
   background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 10px;
 }
+.s-hint { font-size: 11.5px; margin: 8px 2px 0; }
 .sgroup { display: flex; flex-direction: column; gap: 2px; }
 .shead { font-size: 12px; color: #8a94a6; padding: 4px 8px 6px; letter-spacing: .02em; }
 .sitem {
@@ -706,8 +1328,27 @@ onMounted(async () => {
 .sitem.on i { color: #4c7ef3; }
 .bank-main { min-width: 0; display: flex; flex-direction: column; gap: 10px; }
 .bank-main .q-toolbar { margin: 0; }
+.pdftray {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  border: 1px dashed #c7d2e4; border-radius: 10px; padding: 12px; background: #f8fbff;
+}
+.pdftray.hot { border-color: var(--brand); background: #fffbe6; }
+.pdftray .muted { font-size: 12.5px; }
+button.danger { color: #b42318; border-color: #fecdca; }
+button.danger:hover { background: #fef3f2; }
 @media (max-width: 1080px) {
   .bank { grid-template-columns: 1fr; }
-  .bank-side { position: static; flex-direction: row; flex-wrap: wrap; }
+  .bank-side { position: static; flex-direction: column; }
+}
+/* 窄屏：分类变胶囊 */
+@media (max-width: 760px) {
+  .bank-side { max-height: none; padding: 10px 12px; }
+  .sgroup { display: flex; flex-direction: row !important; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .shead { width: 100%; margin: 6px 0 2px; }
+  .sitem { width: auto !important; display: inline-block; padding: 4px 10px; font-size: 12.5px; border-radius: 999px; }
+  .s-hint { display: none; }
+  .qwrap.withb { grid-template-columns: 1fr; }
+  .qwrap.withb > .qgrid { grid-column: 1; grid-row: 1; }
+  .qwrap.withb > .basket { grid-column: 1; grid-row: 2; position: static; }
 }
 </style>

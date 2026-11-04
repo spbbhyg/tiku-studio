@@ -113,6 +113,7 @@ class Question(Base):
     # 归属的整卷 / 届次（可选）
     set_id: Mapped[int | None] = mapped_column(ForeignKey("question_sets.id", ondelete="SET NULL"),
                                               nullable=True, index=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)  # 手动拖拽排序用
 
     scope_status: Mapped[str] = mapped_column(String(16), default="pending")
     scope_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -182,6 +183,22 @@ class AuthoringTag(Base):
     color: Mapped[str] = mapped_column(String(16), default="")
     seq: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class ReaderNote(Base):
+    """精读页的句子批注：按「文档指纹 + 句子键」保存译文与个人批注。"""
+
+    __tablename__ = "reader_notes"
+    __table_args__ = (UniqueConstraint("doc_id", "sentence_key", name="uq_reader_note"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    doc_id: Mapped[str] = mapped_column(String(64), index=True)
+    sentence_key: Mapped[str] = mapped_column(String(64))
+    page_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    translation: Mapped[str] = mapped_column(Text, default="")
+    note: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
 class QuestionSet(Base):

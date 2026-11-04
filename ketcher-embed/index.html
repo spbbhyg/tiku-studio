@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Ketcher</title>
+<style>html,body,#root{height:100%;margin:0}</style>
+</head><body><div id="root"></div>
+
+<script>
+  window.global = window;
+  if (typeof window.process === 'undefined') {
+    window.process = {
+      env: { NODE_ENV: 'production' }, browser: true, version: '', versions: {},
+      nextTick: function (fn) { setTimeout(fn, 0) },
+      cwd: function () { return '/' },
+      emit: function () {}, on: function () {}, once: function () {}, off: function () {},
+      platform: 'browser', argv: [], title: 'browser'
+    };
+  }
+</script>
+<link rel="stylesheet" href="./app.css" />
+<script src="./app.js"></script></body></html>

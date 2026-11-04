@@ -24,8 +24,10 @@ h3 { font-size: 16px; margin: 18px 0 8px; }
 .layout { display: flex; min-height: 100vh; }
 .sidebar {
   width: 200px; flex-shrink: 0; background: #ffffff; border-right: 1px solid var(--line);
-  padding: 18px 12px; position: sticky; top: 0; height: 100vh;
+  padding: 18px 12px; position: sticky; top: 0; height: 100vh; transition: width .16s ease;
 }
+.layout.narrow .sidebar { width: 58px; padding: 18px 6px; }
+.layout.narrow .nav a { text-align: center; }
 .logo { font-weight: 700; font-size: 17px; padding: 0 8px 14px; }
 .logo small { display: block; color: var(--muted); font-weight: 400; font-size: 11px; }
 .nav a {
@@ -120,3 +122,16 @@ input[type="checkbox"], input[type="radio"] {
   width: 15px; height: 15px; padding: 0; margin: 0 4px 0 0;
   flex: 0 0 auto; vertical-align: middle; accent-color: var(--brand);
 }
+
+/* v2 富文本：行内公式与结构式（原子节点）统一按行高缩放 */
+.math-inline { display: inline-block; vertical-align: -0.28em; margin: 0 2px; }
+.math-inline svg { height: 1.35em; width: auto; }
+.rich-body .math-inline .katex { font-size: 1.02em; }
+img.chem-inline {
+  height: 2.2em; width: auto; vertical-align: middle; margin: 0 3px;
+  background: #fff; border-radius: 4px;
+}
+.paper img.chem-inline { height: 2.4em; }
+
+.rich-body img, .rich-body .rich-img { max-width: 100%; height: auto; border-radius: 6px; margin: 6px 0; }
+.paper .rimg { max-width: 100%; height: auto; border-radius: 6px; margin: 6px 0; }

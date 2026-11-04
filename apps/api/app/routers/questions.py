@@ -40,7 +40,9 @@ def list_questions(
     tag: str | None = None,
     tags: str | None = None,
     set_id: int | None = None,
+    ids: str | None = None,
     q: str | None = None,
+    sort: str | None = Query(None, description="added_desc|added_asc|easy|hard|manual"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
 ):
@@ -70,6 +72,15 @@ def list_questions(
     if set_id is not None:
         # set_id = -1 表示「未归卷」
         conds.append(Question.set_id.is_(None) if set_id == -1 else Question.set_id == set_id)
+    if ids:
+        wanted = []
+        for part in ids.split(","):
+            part = part.strip()
+            if part.isdigit():
+                wanted.append(int(part))
+        if not wanted:
+            return {"items": [], "total": 0}
+        conds.append(Question.id.in_(wanted))
     if tag:  # 标签在 JSON 数组里，用 json_each 精确匹配
         conds.append(text(
             "EXISTS (SELECT 1 FROM json_each(questions.tags) WHERE json_each.value = :tag)"
@@ -106,8 +117,14 @@ def list_questions(
         count_stmt = select(func.count()).select_from(Question).where(Question.id.in_(ids))
 
     total = db.scalar(count_stmt)
+    order = {
+        'added_asc': (Question.id.asc(),),
+        'easy': (Question.difficulty.asc(), Question.id.desc()),
+        'hard': (Question.difficulty.desc(), Question.id.desc()),
+        'manual': (Question.sort_order.asc(), Question.id.desc()),
+    }.get((sort or 'added_desc'), (Question.id.desc(),))
     rows = db.scalars(
-        stmt.order_by(Question.id.desc()).offset((page - 1) * page_size).limit(page_size)
+        stmt.order_by(*order).offset((page - 1) * page_size).limit(page_size)
     ).all()
     return {"items": [_serialize(r) for r in rows], "total": total}
 

@@ -13,14 +13,14 @@
 
 | 页面 | 路由 | 用途 |
 | --- | --- | --- |
-| **出题** | `/#/author` | 左边 PDF 框选裁剪，右边 A4 画布自由排版：拖入题图自动对齐、调字号/加粗/对齐、`＋文本` 排版公式、答案就地编辑、元素可多选组合/拆分/复制粘贴；保存即渲染成整页题图入库 |
-| **题库** | `/#/questions` | 按专题（Chemy 九大化学专题）筛选 + 关键词搜索；卡片直接显示题干（KaTeX 渲染）与题图；多选后一键「用所选组卷」或导出 Word / PDF / Markdown |
-| **组卷** | `/#/compose` | ① 从题库挑题：托盘调序、按题型设分值、总分实时累加；② 按单元范围自动抽题配分 |
-| **试卷** | `/#/papers` | 题图与公式正常渲染、单题换题、打印视图、Playwright 一键导出 PDF（题目卷 + 答案卷） |
+| **首页** | `/#/` | 数据概览与最近试卷；顶部是 AI 助教「小卷」（温和、直接、先给步骤的人格），既能问本站功能、操作步骤和按钮位置，也能像普通 AI 一样问化学、写作、编程等通用问题；回答逐字输出，可勾选「联网搜索」（Bing RSS）获取最新网页摘要并在回答下列出来源；免费模型需 DeepSeek Harness 在后台运行 |
+| **出题** | `/#/author` | 左边 PDF 框选裁剪，右边 A4 画布自由排版：拖入题图自动对齐、调字号/加粗/对齐/字体颜色、`＋文本` 排版公式、答案就地编辑、元素可多选组合/拆分/复制粘贴、空白处拖框框选 / `Ctrl+A` 全选；文字块里可选中任意单字/字母改字号或颜色，工具栏「对齐」把所有文字首字对齐、「统一」把选中文字统一成当前字号/颜色；裁剪图可「固定图片」锁住，点右上角 🔒 重新选中，图下文字层可正常拖选；「图片转文字」把裁剪图原地 OCR 成可编辑文字块（裁剪时可勾选自动识别）；PDF 文字按浏览器实际选区精确提取（不会多带相邻行），选中文字自动「连句成行」再插入题目/答案画布，插入按顺序向下排、避免重叠；工具栏「连句」可把已有硬换行整段重排、「对齐」把所有文字首字对齐、「统一」把选中文字统一成当前字号/颜色；「AI 逐页精读」先给每页摘要，再标出机理/重点句子（黄线，左侧面板固定显示页码与摘要）；答案区「AI 生成答案」按小问解题并自动复核，答案+解析+参考文献一起填入、人工可改；点「出题」先选 1–11 道，AI 一次生成后逐题显示在画布上，题干/答案可改，右上角「出下一个题」往下走，全部完成自动生成一套不进题库的新试卷（可命名、导出，也可与已有试卷融合并自动顺延大题号）；保存时 AI 自动识别题型/难度/化学专题并打标签，可一键生成解析 |
+| **题库** | `/#/questions` | 按专题（Chemy 九大化学专题）筛选 + 关键词搜索；卡片直接显示题干（KaTeX 渲染）与题图；多选后可直接「删除所选」、在页内托盘调序、按题型设分值并生成试卷，或导出 Word / PDF / Markdown；「导入题目 / 试卷」支持一次多份 PDF（题目卷 + 答案卷分开也行，也可拖拽），扫描页自动 OCR，AI 按题号拆题并把答案配对、自动归类（中文文件名可直接选） |
+| **试卷** | `/#/papers` | 题图与公式正常渲染、单题换题（AI 题除外）；题目卷 / 答案卷 / 合卷三种可编辑打印视图，标题、题干、答案、解析可直接在页面上改并「保存修改」，再打印或另存 PDF；勾选两套及以上试卷可「融合所选试卷」，大题号自动顺延（1-2 → 2-2，小问号不变） |
 | **资料库** | `/#/books` | 书册 / 单元 / 知识点骨架，题图与原件归口 |
 | **标签管理** | `/#/tags` | 标签分组维护：新增、改名（题目里的旧标签同步）、删除、批量导入、搜索 |
 | **QF题库** | `/#/quizforge` | 内置 [QuizForge](https://github.com/cjxxx222/quizforge) 导入：直接读它的 `quizforge.db`，题库→书册、题目→题目，题型/选项/答案/解析/页码一并带过来，重复导入只补空字段 |
-| **AI拆解** | `/#/ingest` | 可选：上传 PDF 交给视觉大模型自动拆题（需自备 API Key，实验性） |
+| **设置** | `/#/settings` | 数据位置、快捷键、标签管理；「AI 模型」页签可填 DeepSeek API Key，也可一键接入 DeepSeek Harness 本机免费模型（无需 Key），两者随时切换 |
 
 ## 截图
 
@@ -36,9 +36,7 @@
 
 ![题库](docs/screenshots/questions.png)
 
-组卷（挑题 → 托盘调序调分 → 生成）：
-
-![组卷](docs/screenshots/compose.png)
+组卷已并入题库：勾选题目后在页内托盘调序、设分值，生成试卷。
 
 标签管理 / 试卷 / QuizForge 导入：
 
@@ -54,6 +52,9 @@
 git clone <本仓库> && cd tiku-studio
 
 # Windows：双击 start.bat（自动建 venv、装依赖、建前端、起服务）
+# 依赖缺失或与 Python 版本不匹配（例如以前用 3.12 建过 venv）时会自动重建，不用手动删 .venv
+# 全新电脑：双击「一键安装并启动.bat」，缺 Python / Node 时自动下载安装
+# 想先体检：双击「检查环境.bat」
 # macOS / Linux：
 ./start.sh
 ```
@@ -65,15 +66,19 @@ git clone <本仓库> && cd tiku-studio
 
 > 只想要前端静态文件、不想装 Node？把 `apps/web/dist` 预先构建好（`cd apps/web && npm install && npm run build`），后端会自动托管它。
 
+> 要用 DeepSeek 翻译 / 逐页精读 / 生成答案：先打开「设置 → AI 模型」填 API Key（<https://platform.deepseek.com> 申请），无需重启。
+>
+> 没买 API Key 也可以：装 DeepSeek Harness 的免费模型插件并保持它运行，点「设置 → AI 模型 → 检测免费模型插件 → 使用免费模型」即可，不需要填 Key。免费通道与付费 Key 可随时切换，原 Key 不会被覆盖。
+
 ## 目录结构
 
 ```
 apps/api        FastAPI 后端
-  app/routers      books / questions / papers / ingest / manual / authoring / imports / meta
-  app/services     组卷引擎、PDF 渲染、画布渲染（compose_render）、导出（docx/pdf/md）、
-                   LLM 拆解适配器、QuizForge 导入、对纲校验
+  app/routers      books / questions / papers / manual / authoring / imports / ai / meta
+  app/services     组卷引擎、PDF 渲染、画布渲染（compose_render，支持逐字颜色/字号）、导出（docx/pdf/md）、
+                   DeepSeek 适配（ai.py：翻译 / 逐页摘要与重点 / 生成答案 / 题型归类 / 生成解析）、QuizForge 导入、对纲校验
 apps/api/tests   pytest 用例与最小夹具（fixtures/ 里 1 册课本纲 + 8 道题）
-apps/web        Vue3 + Vite 前端（出题/题库/组卷/试卷/资料库/标签/QF题库/AI拆解/设置）
+apps/web        Vue3 + Vite 前端（出题/题库/试卷/资料库/标签/QF题库/设置）
 packages/schema 拆解产物的 JSON Schema（本地 Agent 与 API 两种引擎共用）
 agent/          本地 Agent 拆解提示词手册
 scripts/        import_bundle.py 等脚本
@@ -93,14 +98,32 @@ data/           你的私有数据（gitignored）：tiku.db、题图库、上�
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/stats` | 首页统计 |
-| GET/POST | `/api/questions` | 题库检索（`q` / `book_id` / `q_type` / `difficulty` / `tag` / 分页）/ 新增 |
+| GET/POST | `/api/questions` | 题库检索（`q` / `book_id` / `q_type` / `difficulty` / `tag` / `ids` / 分页）/ 新增 |
 | PUT/DELETE | `/api/questions/{id}` | 改 / 删 |
 | GET/POST | `/api/papers` | 试卷列表 / 组卷（`question_ids` 手动选题，或 `textbook_id` + 单元范围自动） |
-| GET | `/api/papers/{id}/view` · `/export` | 打印视图 / PDF 导出 |
+| GET | `/api/papers/{id}/view` · `/export` | 可编辑打印视图（`part=all\|questions\|answers`）/ PDF 导出（支持 `part`，题目卷与答案卷分开生成；借系统 Edge/Chrome 渲染） |
+| PATCH | `/api/papers/{id}/items` | 打印视图里保存改过的标题/题干/答案/解析 |
 | GET/POST | `/api/authoring/compose` | 出题画布：保存版面（渲染成整页 PNG 入库）/ 读取回填 |
 | GET/POST/PUT/DELETE | `/api/authoring/tags` | 标签库维护 |
 | GET | `/api/authoring/export` | 题库导出 `fmt=docx\|pdf\|md`，可按筛选或 `ids` |
 | POST | `/api/manual/upload` · `/crop` | 资料页图服务：上传 PDF、按归一化矩形裁剪 |
+| GET | `/api/manual/docs` | 已上传文献列表（刷新页面不丢） |
+| GET | `/api/manual/doc/{id}/page/{n}/text` | 取该页文字行及归一化坐标（前端文字选择层） |
+| POST | `/api/manual/extract-text` | 按框选矩形从 PDF 精确提取文字（自动吸附整行） |
+| GET/POST | `/api/ai/status` · `/config` | DeepSeek 配置状态 / 保存 Key、Base URL、模型，或切换本机免费模型（`free_gateway`） |
+| GET | `/api/ai/free-models` | 检测 DeepSeek Harness 本机网关并列出免费模型（无需站点保存 Key） |
+| POST | `/api/ai/test` · `/translate` | 测试连接 / 英文学术文本翻译 |
+| POST | `/api/ai/chat` · `/chat/stream` | 首页 AI 对话：站内资料 + 通用问答，`search: true` 时先联网搜 Bing；`chat` 一次性返回，`chat/stream` 用 SSE 逐字输出（最多 40 条 / 6 万字） |
+| POST | `/api/ai/summarize-page` | 逐页精读：返回该页中文摘要 `summary` 与机理/重点句 `key_points`（含行号与归一化 y；扫描页自动走本机 OCR，需 `rapidocr_onnxruntime`） |
+| POST | `/api/ai/answer` | 按题干 + 题型 + 已有答案提示解题并自动复核，返回 `answer`、`analysis`、`references` |
+| POST | `/api/ai/ocr-image` | 把选中的裁剪图 OCR 成文字（返回 `text`、`lines`） |
+| POST | `/api/ai/classify` · `/analysis` | 题型/难度/专题归类 / 为题目生成中文解析 |
+| POST | `/api/papers/ai` | 按素材（文献摘要/选中文字/整份 PDF）直接生成一套不进题库的试卷（`count`/`title`/`doc_id`） |
+| POST | `/api/papers/ai/preview` | 分步出题：只生成 1–11 道题的快照，不建卷、不写题库 |
+| POST | `/api/papers/ai/build` | 分步出题最后一步：把逐题（可人工改过）的快照建成一套试卷 |
+| POST | `/api/papers/merge` | 融合两套及以上试卷：大题号自动顺延，小问号不变 |
+| POST | `/api/import/paper` | 导入单份试卷 PDF：自动 OCR、拆题拆答案、建书册并归入化学专题（支持中文文件名） |
+| POST | `/api/import/papers` | 一次导入多份 PDF（题目卷/答案卷可分开，也可拖拽）：合并文字后按题号配对拆题 |
 | GET/POST | `/api/import/quizforge` | QuizForge 库探测 / 导入（也可 `POST /upload` 传 .db） |
 
 完整的交互式文档在 <http://localhost:8100/docs>。
@@ -109,7 +132,7 @@ data/           你的私有数据（gitignored）：tiku.db、题图库、上�
 
 - 所有 PDF、题图、数据库都在本地 `data/`（gitignored），不上传任何服务器。
 - 仓库**不含**任何受版权保护的教材/文献扫描件。
-- 仅在配置了 LLM API Key 时，「AI拆解」才会把你的 PDF 页面图片发给你选定的模型服务商。
+- 使用 DeepSeek 翻译时只发送你选中/提取的那段文字；「AI 逐页精读」只发送当前页的文字行；「AI 生成答案」只发送题目画布文字与已有答案；「AI 出 N 题」只发送你在出题页的题干/摘要/答案素材（或你指定整份 PDF 提取出的文字）；整卷 PDF 导入只发送所选各卷提取/OCR 出的文字（多份会合并后一次发送）；分步出题与直接出题发送你给的素材或指定 PDF 的文字；保存时的题型归类只发送题目画布文字，生成解析只发送题干与答案（都不含整份 PDF 原件、不上传图片）。Key 保存在本地数据库 `settings` 表，不会进仓库。
 
 ## 参与开发
 
@@ -187,7 +210,9 @@ MIT。本项目基于 [cy-0754/tiku-studio](https://github.com/cy-0754/tiku-stud
   - 常规：数据位置、当前统计、服务与日志说明；
   - 快捷键：八个动作（复制 / 粘贴 / 组合 / 拆分 / 删除 / 旋转 / 新建文本 / 取消）都可自行录制，存本机 localStorage，即时生效；
   - 标签管理：原独立页并入设置，支持分组、改名（同步历史题目）、删除、批量导入。
-- **移除 AI 拆解**：删除 outers/ingest.py、services/ingest_llm.py、/api/settings 与前端 Ingest.vue；投递箱接口保留为轻量 outers/inbox.py（资料库页仍可导入 data/inbox 里的 bundle JSON）。
+- **移除 AI 拆解**：删除 
+outers/ingest.py、services/ingest_llm.py、/api/settings 与前端 Ingest.vue；投递箱接口保留为轻量 
+outers/inbox.py（资料库页仍可导入 data/inbox 里的 bundle JSON）。
 - 侧边栏现为：首页 / 出题 / 题库 / 组卷 / 试卷 / 资料库 / QF题库 / 设置。
 
 ## 更新记录（v0.10，2026-10-31）
@@ -208,3 +233,14 @@ MIT。本项目基于 [cy-0754/tiku-studio](https://github.com/cy-0754/tiku-stud
   - 「入库信息」改为可拖动浮动面板，参考答案保留为可选文本（支持 $公式$）。
   - 保存时题目画布渲染成题图、答案画布渲染成答案图（images 里 caption 分别为「题干」「答案」），题库卡片「查看参考答案」直接显示答案图。
 - 数据层：questions 新增 nswer_layout（JSON，存答案画布版面），迁移幂等。
+
+## v2 编辑体系（2026-11，重构中）
+
+面向「题组/大题 + 小问」的新结构，与旧版题库并存（旧页面未改动）。
+
+- **数据模型**：`question_groups`（题组，题干是 Tiptap JSON）、`subquestions`（小问一等实体：题干/答案/评分细则/分值/标签/素材引用）、`chem_objects`（公式 LaTeX、结构式 MOL/SMILES + SVG 渲染）、`materials`（素材库，按 ID 引用）、`entity_versions`（版本快照）、`paper_templates`、`basket_items`（组卷篮，含进篮快照）。
+- **编辑器** `/#/v2/editor`：Tiptap 富文本；公式/结构式是**行内原子节点**（`$…$` 直接输入即转公式）；结构式用**侧边面板**贴 SMILES/MOL，服务端 RDKit 渲染 + 自动 Clean Up（重算 2D 坐标）；三栏（题组列表 / 编辑 / 素材 + 实时预览）；1 秒自动保存；草稿可残缺；状态机 草稿→待审→已审→已入库；版本快照可看。
+- **录入体验**：`Ctrl+Enter` 加小问、`Alt+↑/↓` 调序、`Tab` 在题干与小问间跳转、元数据折叠、答案与评分细则默认折叠、标签可用 AI 自动推断。
+- **组卷篮** `/#/v2/basket`：按**小问**加入、拖拽/上下移排序、分值可改、题号自动重排、合计分实时；保存时把当前内容写入 `basket_items.snapshot`。
+- **导出**：`GET /api/v2/papers/{id}/export?fmt=pdf|html` —— 服务端渲染打印 HTML（公式转图内联、结构式内联 SVG）→ Playwright 出 PDF；**优先使用进篮快照**，题库后改不影响已出的卷；`GET /api/v2/papers/{id}/check` 先做检查清单（空篮/小问被删/空题干/空答案/0 分/图片丢失/内容已更新）。
+- **依赖**：`rdkit`（服务端结构式渲染）、`@tiptap/*`、`katex`、`playwright`（PDF）。

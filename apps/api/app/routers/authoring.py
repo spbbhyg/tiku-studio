@@ -30,12 +30,13 @@ from ..db import get_db
 from ..services import versions as version_svc
 from ..models import AuthoringTag, Book, Question, Setting, Unit
 from ..services import authoring_export as exporter
+from ..services import ai as ai_svc
 from ..services.bundle_import import _question_hash
 
 router = APIRouter(prefix="/api/authoring", tags=["authoring"])
 
 Q_TYPES = ["单选", "多选", "判断", "填空", "名词解释", "简答", "论述",
-           "计算", "证明", "案例分析", "翻译", "文献阅读", "其他"]
+           "计算", "证明", "案例分析", "翻译", "文献阅读", "综合", "其他"]
 
 TAG_SEED_MARKER = "authoring_tags_seeded_v2"
 
@@ -331,6 +332,23 @@ def get_question(question_id: int, db: Session = Depends(get_db)):
 
 
 # ---------------------------------------------------------------- 大题画布
+def _ensure_topic_tags(db: Session, names: list[str]) -> None:
+    """AI 归类出的专题若标签库里还没有，就补进去，方便题库按专题筛选。"""
+    wanted = [n for n in names if n in CHEMY_TOPICS]
+    if not wanted:
+        return
+    _ensure_seed(db)
+    have = {t.name for t in db.scalars(
+        select(AuthoringTag).where(AuthoringTag.name.in_(wanted))).all()}
+    seq = db.scalar(select(func.max(AuthoringTag.seq))) or 0
+    for name in wanted:
+        if name in have:
+            continue
+        seq += 1
+        db.add(AuthoringTag(name=name, group="专题", seq=seq))
+        have.add(name)
+
+
 class ComposeIn(BaseModel):
     """出题画布：版面 + 归属，保存时渲染成一张 A4 题图写入题库。"""
 
@@ -346,8 +364,11 @@ class ComposeIn(BaseModel):
     locator: str = ""
     status: str = "confirmed"
     answer: str = ""
+    analysis: str = ""
     answer_images: list[str] = Field(default_factory=list)
     answer_layout: dict | None = None
+    stem_text: str = ""                 # 图片题的题干文字（只用于 AI 归类/解析，不参与渲染）
+    auto_classify: bool = True          # 保存后让 AI 判断题型/专题并自动打标签
 
 
 @router.post("/compose")
@@ -364,12 +385,57 @@ def compose_question(body: ComposeIn, db: Session = Depends(get_db)):
     if body.unit_id and not db.get(Unit, body.unit_id):
         raise HTTPException(400, "单元不存在")
 
+    # 图片题没有可搜索的题干：把老师填的「题干文字」随版面一起存下来，
+    # 既给 AI 归类/解析用，重新打开时也能回填。
+    if (body.stem_text or "").strip():
+        body.layout.setdefault("meta", {})["stem_text"] = body.stem_text.strip()
+
     rendered = compose_render.render_layout(body.layout)
     ans_rendered = None
     if body.answer_layout and (body.answer_layout.get("blocks") or []):
         ans_rendered = compose_render.render_layout(body.answer_layout)
     content_hash = compose_render.layout_hash(body.layout)
     tags = [t.strip() for t in body.tags if t and t.strip()]
+    final_qtype = body.q_type if body.q_type in Q_TYPES else "简答"
+    final_diff = body.difficulty if body.difficulty in (1, 2, 3) else 2
+
+    # 保存后自动识别题型 / 难度 / 化学专题；没配 Key 或调用失败时按关键词兜底，
+    # 绝不让归类失败挡住入库。
+    classified = None
+    if body.auto_classify:
+        texts = []
+        if (body.stem_text or "").strip():
+            texts.append(body.stem_text.strip())
+        for lay in (body.layout, body.answer_layout or {}):
+            for blk in (lay.get("blocks") or []):
+                if blk.get("type") == "text" and (blk.get("text") or "").strip():
+                    texts.append(blk["text"])
+        if (body.answer or "").strip():
+            texts.append(body.answer)
+        joined = "\n".join(texts).strip()
+        if joined:
+            try:
+                classified = ai_svc.classify_question(
+                    db, joined, q_types=Q_TYPES, topics=CHEMY_TOPICS,
+                    default_q_type=final_qtype)
+            except HTTPException as exc:
+                classified = ai_svc.heuristic_classify(
+                    joined, q_types=Q_TYPES, topics=CHEMY_TOPICS,
+                    default_q_type=final_qtype)
+                classified["reason"] += f"（AI 不可用：{exc.detail}）"
+            except Exception:                            # noqa: BLE001
+                classified = ai_svc.heuristic_classify(
+                    joined, q_types=Q_TYPES, topics=CHEMY_TOPICS,
+                    default_q_type=final_qtype)
+            if classified:
+                if classified.get("q_type") in Q_TYPES:
+                    final_qtype = classified["q_type"]
+                if classified.get("difficulty") in (1, 2, 3):
+                    final_diff = classified["difficulty"]
+                for topic in classified.get("topics") or []:
+                    if topic in CHEMY_TOPICS and topic not in tags:
+                        tags.append(topic)
+                _ensure_topic_tags(db, classified.get("topics") or [])
 
     q = db.get(Question, body.question_id) if body.question_id else None
     created = q is None
@@ -387,8 +453,10 @@ def compose_question(body: ComposeIn, db: Session = Depends(get_db)):
     q.content_hash = content_hash
     q.stem = ""
     q.answer = (body.answer or "").strip()
-    q.q_type = body.q_type if body.q_type in Q_TYPES else "简答"
-    q.difficulty = body.difficulty if body.difficulty in (1, 2, 3) else 2
+    if (body.analysis or "").strip():
+        q.analysis = body.analysis.strip()
+    q.q_type = final_qtype
+    q.difficulty = final_diff
     q.tags = tags
     imgs = [{"path": rendered["path"], "caption": "题干"}]
     if ans_rendered:
@@ -410,7 +478,10 @@ def compose_question(body: ComposeIn, db: Session = Depends(get_db)):
     db.refresh(q)
     return {"id": q.id, "created": created, "image": rendered["path"],
             "width": rendered["width"], "height": rendered["height"],
-            "answer_image": (ans_rendered or {}).get("path")}
+            "answer_image": (ans_rendered or {}).get("path"),
+            "answer": q.answer or "", "analysis": q.analysis or "",
+            "q_type": q.q_type, "difficulty": q.difficulty, "tags": tags,
+            "classified": classified}
 
 
 @router.get("/compose/{question_id}")
@@ -423,8 +494,10 @@ def get_compose(question_id: int, db: Session = Depends(get_db)):
         "answer_layout": q.answer_layout or {"blocks": []},
         "book_id": q.book_id, "unit_id": q.unit_id, "q_type": q.q_type,
         "difficulty": q.difficulty, "tags": q.tags or [], "answer": q.answer or "",
+        "analysis": q.analysis or "",
         "source_title": q.source_title or "", "source_citation": q.source_citation or "",
         "locator": q.source_page or "", "status": q.status,
+        "stem_text": ((q.layout or {}).get("meta") or {}).get("stem_text", ""),
         "stem_image": next((i.get("path") for i in q.images or []), None),
         "stem_image2": None,
         "answer_images": [i.get("path") for i in (q.images or [])

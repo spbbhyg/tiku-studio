@@ -6,6 +6,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '../api.js'
+import WrongBooks from '../components/WrongBooks.vue'
 
 const info = reactive({ found: false, db_path: '', hint: '', banks: [] })
 const route = useRoute()
@@ -68,6 +69,8 @@ onMounted(load)
     这里直接读 QuizForge 的数据库，把它的题库搬进本系统：
     <code>题库 → 书册</code>、<code>题目 → 题目</code>，题型、选项、答案、解析、页码都带过来，重复导入只补空字段。
   </p>
+
+  <WrongBooks />
 
   <div class="card qf-head">
     <div class="qf-path">

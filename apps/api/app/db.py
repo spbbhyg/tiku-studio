@@ -46,6 +46,12 @@ def _migrate() -> None:
             if "set_id" not in cols:
                 conn.execute(text("ALTER TABLE questions ADD COLUMN set_id INTEGER"))
                 conn.execute(text("CREATE INDEX IF NOT EXISTS ix_questions_set ON questions (set_id)"))
+            if "sort_order" not in cols:
+                conn.execute(text("ALTER TABLE questions ADD COLUMN sort_order INTEGER DEFAULT 0"))
+        if "wb_wrong_items" in tables:
+            cols = _columns(conn, "wb_wrong_items")
+            if "note" not in cols:
+                conn.execute(text("ALTER TABLE wb_wrong_items ADD COLUMN note TEXT"))
         # 文献出题已并入主题库，独立表不再使用
         if "authoring_questions" in tables:
             conn.execute(text("DROP TABLE authoring_questions"))
@@ -53,6 +59,8 @@ def _migrate() -> None:
 
 def init_db() -> None:
     from . import models  # noqa: F401  确保模型注册
+    from . import models_v2  # noqa: F401  v2 表（题组/小问/化学对象/素材/模板/组卷篮）
+    from . import models_wb  # noqa: F401  工作台表（分类/错题集/导出日志）
 
     Base.metadata.create_all(engine)
     _migrate()
