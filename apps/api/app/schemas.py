@@ -53,6 +53,8 @@ class QuestionOut(ORMModel):
     difficulty: int
     knowledge_points: list[str] = []
     images: list[dict] = []
+    layout: Optional[dict] = None
+    answer_layout: Optional[dict] = None
     source_page: Optional[str] = None
     source_title: Optional[str] = None
     source_citation: Optional[str] = None
@@ -164,6 +166,9 @@ class PaperBrief(BaseModel):
     duration_minutes: int
     question_count: int
     created_at: datetime
+    kind: str = ""          # manual = 人工整卷（PaperMaker 出卷）
+    source: str = ""        # canvas / ai / manual …
+    status: str = ""        # manual 卷：draft（草稿）/ done（已出完）
 
 
 class StatsOut(BaseModel):

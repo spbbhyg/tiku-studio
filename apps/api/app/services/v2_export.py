@@ -86,29 +86,32 @@ def doc_html(doc, size: float = 12.0) -> str:
 
 
 CSS = """
-@page { size: A4; margin: 18mm 16mm; }
+@page { size: A4; margin: 22mm 32mm 20mm; }
 * { box-sizing: border-box; }
-body { font-family: "DengXian", "Microsoft YaHei", serif; font-size: 11.5pt; color: #111; line-height: 1.6; }
-h1 { font-size: 17pt; text-align: center; margin: 0 0 4mm; letter-spacing: 1px; }
-.subtitle { text-align: center; color: #444; font-size: 10.5pt; margin: -1mm 0 3mm; }
-.meta { text-align: center; color: #444; font-size: 10pt; margin-bottom: 3mm; }
-.fields { display: flex; gap: 10mm; font-size: 10.5pt; margin: 0 0 3mm; }
-.fields span { flex: 1; border-bottom: 1px solid #333; padding-bottom: 1mm; }
-hr.sep { border: 0; border-top: 1px solid #bbb; margin: 3mm 0 4mm; }
-.gtitle { font-weight: 700; font-size: 12.5pt; margin: 5mm 0 2mm; }
-.q { margin: 0 0 3.2mm; }
-.qhead { display: flex; gap: 2mm; align-items: baseline; }
-.qno { font-weight: 700; min-width: 9mm; }
-.qscore { color: #555; font-size: 10pt; }
-p { margin: 0 0 1.6mm; }
+/* 参照第41届 Chemy 考试卷：正文 10.5pt 宋体 + Times 数字，版心 146mm，行距 1.45 */
+body { font-family: "SimSun", "宋体", "Times New Roman", serif; font-size: 10.5pt; color: #000; line-height: 1.45; }
+h1 { font-family: "SimHei", "黑体", "SimSun", serif; font-size: 12.5pt; text-align: center; margin: 0 0 2.4mm; letter-spacing: .3px; }
+.subtitle { text-align: center; color: #333; font-size: 9.5pt; margin: -0.6mm 0 2mm; }
+.meta { text-align: center; color: #444; font-size: 9pt; margin-bottom: 2mm; }
+.fields { display: flex; gap: 8mm; font-size: 9.5pt; margin: 0 0 2.4mm; }
+.fields span { flex: 1; border-bottom: 1px solid #333; padding-bottom: 0.8mm; }
+hr.sep { border: 0; border-top: 1px solid #999; margin: 2mm 0 3mm; }
+/* 大题标题：Arial Bold，与样卷「第 1 题 磷化学（29 分，占 11%）」一致 */
+.gtitle { font-family: "Arial", "Microsoft YaHei", sans-serif; font-weight: 700; font-size: 10.5pt; margin: 3.6mm 0 1.2mm; }
+.q { margin: 0 0 1.6mm; page-break-inside: avoid; }
+.qhead { display: flex; gap: 1.6mm; align-items: baseline; }
+.qno { font-family: "Arial", "Microsoft YaHei", sans-serif; font-weight: 700; min-width: 7.5mm; }
+.qscore { color: #000; font-size: 9.5pt; }
+p { margin: 0 0 0.9mm; }
 img.m { vertical-align: -0.35em; }
 img.c { vertical-align: middle; }
-.answers { margin-top: 6mm; page-break-before: always; }
-.answers h2 { font-size: 13pt; text-align: center; margin-bottom: 3mm; }
-.ans { margin: 0 0 2.4mm; font-size: 10.8pt; }
-.ans b { color: #0b6b3a; }
-ul, ol { margin: 0 0 1.6mm 6mm; padding: 0; }
+.answers { margin-top: 5mm; page-break-before: always; }
+.answers h2 { font-family: "SimHei", "黑体", sans-serif; font-size: 11.5pt; text-align: center; margin-bottom: 2.4mm; }
+.ans { margin: 0 0 1.8mm; font-size: 9.8pt; }
+.ans b { color: #000; font-weight: 700; }
+ul, ol { margin: 0 0 1.2mm 5mm; padding: 0; }
 """
+
 
 
 def _item_rows(session: Session, paper_id: int):
@@ -239,7 +242,7 @@ def basket_html(session: Session, paper_id: int, title: str = "试卷", opts: di
 
     css = CSS
     css = re.sub(r"@page\s*\{[^}]*\}",
-                 "@page { size: A4; margin: 18mm %dmm; }" % int(sp.get("margin_mm") or 16), css, count=1)
+                 "@page { size: A4; margin: 18mm %dmm; }" % int(sp.get("margin_mm") or 32), css, count=1)
     css = re.sub(r"(body\s*\{[^}]*?font-size:\s*)[\d.]+pt",
                  lambda m: m.group(1) + ("%g" % body_size) + "pt", css, count=1)
     return f"<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><title>{escape(title)}</title><style>{css}</style></head><body>{''.join(body)}</body></html>"

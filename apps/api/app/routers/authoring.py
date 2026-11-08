@@ -18,14 +18,22 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from ..config import LIBRARY_DIR
 from ..db import get_db
 from ..services import versions as version_svc
 from ..models import AuthoringTag, Book, Question, Setting, Unit
@@ -34,6 +42,9 @@ from ..services import ai as ai_svc
 from ..services.bundle_import import _question_hash
 
 router = APIRouter(prefix="/api/authoring", tags=["authoring"])
+
+# PDF 结构化解析工具（独立进程，见 tools/pdf_import/cli.py 里的许可证说明）
+PDF_TOOL = Path(__file__).resolve().parents[4] / "tools" / "pdf_import" / "cli.py"
 
 Q_TYPES = ["单选", "多选", "判断", "填空", "名词解释", "简答", "论述",
            "计算", "证明", "案例分析", "翻译", "文献阅读", "综合", "其他"]
@@ -371,6 +382,314 @@ class ComposeIn(BaseModel):
     auto_classify: bool = True          # 保存后让 AI 判断题型/专题并自动打标签
 
 
+class ComposeTextIn(BaseModel):
+    """单题模式：一份结构化题面 doc（layout.kind == "text"）。"""
+    doc: dict
+    question_id: int | None = None
+    book_id: int | None = None
+    unit_id: int | None = None
+    q_type: str = "简答"
+    difficulty: int = 2
+    tags: list[str] = Field(default_factory=list)
+    source_title: str = ""
+    source_citation: str = ""
+    locator: str = ""
+    status: str = "confirmed"
+    auto_classify: bool = True
+
+
+def _blocks_text(blocks: list) -> str:
+    out = []
+    for b in blocks or []:
+        if not isinstance(b, dict):
+            continue
+        if b.get("t") == "p" and (b.get("text") or "").strip():
+            out.append(str(b["text"]).strip())
+        elif b.get("t") == "table":
+            head = b.get("head") or []
+            if head:
+                out.append(" ".join(str(x) for x in head))
+            for row in b.get("rows") or []:
+                out.append(" ".join(str(x) for x in row))
+    return "\n".join(out).strip()
+
+
+def _subs_answer_text(subs: list) -> str:
+    out = []
+    for s in subs or []:
+        if not isinstance(s, dict):
+            continue
+        if (s.get("answer") or "").strip():
+            out.append(str(s["answer"]).strip())
+        for pt in s.get("points") or []:
+            if str(pt).strip():
+                out.append(str(pt).strip())
+        if s.get("subs"):
+            inner = _subs_answer_text(s["subs"])
+            if inner:
+                out.append(inner)
+    return "\n".join(out).strip()
+
+
+def _doc_images(doc: dict) -> list[dict]:
+    """收集 doc 里所有图（题干 + 小问 + 答案），供 q.images / 图库复用。"""
+    out: list[dict] = []
+
+    def push(im, fallback_caption: str):
+        if isinstance(im, str):
+            path, cap = im, fallback_caption
+        elif isinstance(im, dict):
+            path, cap = im.get("path") or "", im.get("caption") or fallback_caption
+        else:
+            return
+        if path:
+            out.append({"path": str(path).replace("\\", "/").lstrip("/"), "caption": str(cap or "")})
+
+    for b in doc.get("stem") or []:
+        if isinstance(b, dict) and b.get("t") == "img":
+            push({"path": b.get("path"), "caption": b.get("caption")}, "题干")
+
+    def walk(subs, kind="小问"):
+        for s in subs or []:
+            if not isinstance(s, dict):
+                continue
+            for im in s.get("imgs") or s.get("images") or []:
+                push(im, kind)
+            for im in s.get("answer_images") or []:
+                push(im, "答案")
+            walk(s.get("subs"), kind)
+
+    walk(doc.get("subs"))
+    # 去重（同一张图被题干和小问都引用时只留一份）
+    seen, uniq = set(), []
+    for im in out:
+        if im["path"] in seen:
+            continue
+        seen.add(im["path"])
+        uniq.append(im)
+    return uniq
+
+
+def _text_warnings(doc: dict) -> list[str]:
+    warn: list[str] = []
+
+    def score_of(s):
+        try:
+            return float(s.get("score") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def walk(subs, prefix):
+        for i, s in enumerate(subs or [], 1):
+            if not isinstance(s, dict):
+                continue
+            no = s.get("no") or f"{prefix}-{i}" if prefix else str(i)
+            sc = score_of(s)
+            kids = s.get("subs") or []
+            if sc <= 0:
+                warn.append(f"小问 {no} 是 0 分")
+            if kids:
+                inner = sum(score_of(k) for k in kids)
+                if abs(inner - sc) > 0.001:
+                    warn.append(f"小问 {no} 的子问合计 {inner:g} 分 ≠ 本身 {sc:g} 分")
+                walk(kids, no)
+
+    walk(doc.get("subs"), "1")
+    return warn
+
+
+@router.post("/compose-text")
+def compose_text(body: ComposeTextIn, db: Session = Depends(get_db)):
+    """单题模式入库：doc 存进 questions.layout，冗余字段（stem/answer/images）同步写。
+
+    与画布模式的 content_hash 必须分开算——画布用版面哈希，这里用「书册+题干+答案」，
+    否则同题干不同答案会被覆盖。
+    """
+    import hashlib
+
+    doc = dict(body.doc or {})
+    if str(doc.get("kind") or "") != "text":
+        raise HTTPException(400, "doc.kind 必须是 text")
+    stem_text = _blocks_text(doc.get("stem") or [])
+    if not stem_text and not any(isinstance(b, dict) and b.get("t") == "img"
+                                 for b in doc.get("stem") or []):
+        # 图片现在会挂到具体小问上，题干可能只剩一行标题、图都在 7-1 / 7-2 里，
+        # 这种不算空题；真的什么都没有才拒。
+        if not _doc_images(doc) and not any(
+                (s.get("text") or "").strip() for s in (doc.get("subs") or [])):
+            raise HTTPException(400, "题干是空的")
+
+    book = db.get(Book, body.book_id) if body.book_id else _default_book(db)
+    if not book:
+        raise HTTPException(400, "书册不存在")
+    if body.unit_id and not db.get(Unit, body.unit_id):
+        raise HTTPException(400, "单元不存在")
+
+    answer_text = _subs_answer_text(doc.get("subs") or [])
+    images = _doc_images(doc)
+    raw = f"{book.id}|{stem_text}|{answer_text}".encode("utf-8")
+    content_hash = hashlib.sha1(raw).hexdigest()[:32]
+
+    tags = [t.strip() for t in body.tags if t and t.strip()]
+    final_qtype = body.q_type if body.q_type in Q_TYPES else "简答"
+    final_diff = body.difficulty if body.difficulty in (1, 2, 3) else 2
+
+    classified = None
+    if body.auto_classify:
+        joined = "\n".join(x for x in (stem_text, answer_text) if x).strip()
+        if joined:
+            try:
+                classified = ai_svc.classify_question(
+                    db, joined, q_types=Q_TYPES, topics=CHEMY_TOPICS,
+                    default_q_type=final_qtype)
+            except HTTPException as exc:
+                classified = ai_svc.heuristic_classify(
+                    joined, q_types=Q_TYPES, topics=CHEMY_TOPICS,
+                    default_q_type=final_qtype)
+                classified["reason"] += f"（AI 不可用：{exc.detail}）"
+            except Exception:                            # noqa: BLE001
+                classified = ai_svc.heuristic_classify(
+                    joined, q_types=Q_TYPES, topics=CHEMY_TOPICS,
+                    default_q_type=final_qtype)
+        if classified:
+            if classified.get("q_type") in Q_TYPES:
+                final_qtype = classified["q_type"]
+            if classified.get("difficulty") in (1, 2, 3):
+                final_diff = classified["difficulty"]
+            for topic in classified.get("topics") or []:
+                if topic in CHEMY_TOPICS and topic not in tags:
+                    tags.append(topic)
+            _ensure_topic_tags(db, classified.get("topics") or [])
+
+    q = db.get(Question, body.question_id) if body.question_id else None
+    created = q is None
+    if q is None:
+        q = db.scalar(select(Question).where(
+            Question.book_id == book.id, Question.content_hash == content_hash))
+        if q:
+            created = False
+    if q is None:
+        q = Question(book_id=book.id, content_hash=content_hash, stem="", answer="",
+                     q_type="简答")
+        db.add(q)
+
+    doc["v"] = int(doc.get("v") or 1)
+    doc["kind"] = "text"
+    q.book_id = book.id
+    q.unit_id = body.unit_id
+    q.content_hash = content_hash
+    # 题面标题也进 stem：题库按 stem 搜索，不写标题就搜不到「未知物的推断」
+    title_line = str((doc.get("meta") or {}).get("title") or "").strip()
+    q.stem = (title_line + "\n" + stem_text) if title_line else stem_text
+    q.answer = answer_text
+    q.q_type = final_qtype
+    q.difficulty = final_diff
+    q.tags = tags
+    q.images = images
+    q.layout = doc
+    q.answer_layout = None
+    q.source_title = (body.source_title or "").strip() or None
+    q.source_citation = (body.source_citation or "").strip() or None
+    q.source_page = (body.locator or "").strip() or None
+    q.status = "confirmed" if body.status == "confirmed" else "draft"
+    q.scope_status = "ok" if body.unit_id else "pending"
+    q.scope_reason = "单题录入"
+    db.commit()
+    db.refresh(q)
+    return {"id": q.id, "created": created, "classified": classified,
+            "stem": q.stem, "images": images, "warnings": _text_warnings(doc)}
+
+
+class PdfImportIn(BaseModel):
+    """批量入库：把校对过的 doc 列表一次写进题库。"""
+    docs: list[dict] = Field(default_factory=list)
+    book_id: int | None = None
+    unit_id: int | None = None
+    q_type: str = "简答"
+    status: str = "confirmed"
+    source_title: str = ""
+    tags: list[str] = Field(default_factory=list)
+
+
+@router.post("/pdf-parse")
+async def pdf_parse(file: UploadFile = File(...), answer: UploadFile | None = File(None),
+                    dpi: int = 300):
+    """PDF → 结构化题面。
+
+    解析交给独立进程 `tools/pdf_import/cli.py`（PyMuPDF 是 AGPL，主程序不 import 它），
+    只通过 JSON 文件交换结果；抽出来的图落到 `data/library/import/<doc_id>/`。
+    """
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, "PDF 是空的")
+    doc_id = hashlib.sha1(raw).hexdigest()[:12]
+    # 把源 PDF 也登记成「文献」，这样整卷导入之后还能在精读/裁图里打开原页
+    try:
+        up = LIBRARY_DIR / "uploads"
+        up.mkdir(parents=True, exist_ok=True)
+        seed = up / f"{doc_id}.pdf"
+        if not seed.exists():
+            seed.write_bytes(raw)
+            (up / f"{doc_id}.json").write_text(
+                json.dumps({"filename": getattr(file, "filename", "") or "导入.pdf",
+                            "uploaded_at": "", "source": "pdf-import"},
+                           ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    tmp = Path(tempfile.mkdtemp(prefix="pdfimp-"))
+    try:
+        pdf_path = tmp / "src.pdf"
+        pdf_path.write_bytes(raw)
+        cmd = [sys.executable, str(PDF_TOOL), "--pdf", str(pdf_path),
+               "--dpi", str(max(72, min(int(dpi or 300), 600))),
+               "--img-dir", str(LIBRARY_DIR / "import" / doc_id),
+               "--img-prefix", f"import/{doc_id}",
+               "--out", str(tmp / "out.json")]
+        if answer is not None:
+            adata = await answer.read()
+            if adata:
+                ans_path = tmp / "ans.pdf"
+                ans_path.write_bytes(adata)
+                cmd += ["--answer", str(ans_path)]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=180)
+        except subprocess.TimeoutExpired:
+            raise HTTPException(504, "解析超时（>180 秒），换个文件或拆成多份再试")
+        if proc.returncode != 0:
+            tail = (proc.stderr or b"").decode("utf-8", "replace").strip()[-400:]
+            raise HTTPException(500, f"解析失败：{tail or '未知错误'}")
+        data = json.loads((tmp / "out.json").read_text(encoding="utf-8"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    for it in data.get("items") or []:
+        src = it.setdefault("source", {})
+        src["doc_id"] = doc_id
+    return {"doc_id": doc_id, **data}
+
+
+@router.post("/pdf-import")
+def pdf_import(body: PdfImportIn, db: Session = Depends(get_db)):
+    """把校对过的结构化题面批量入库（逐题走单题模式那套冗余字段与分类）。"""
+    ok, failed = [], []
+    for idx, doc in enumerate(body.docs or [], 1):
+        if not isinstance(doc, dict):
+            failed.append({"index": idx, "error": "不是对象"})
+            continue
+        try:
+            r = compose_text(ComposeTextIn(
+                doc=doc, book_id=body.book_id, unit_id=body.unit_id,
+                q_type=body.q_type, tags=list(body.tags or []),
+                source_title=body.source_title, status=body.status,
+                source_citation=str((doc.get("source") or {}).get("locator") or ""),
+            ), db)
+            ok.append(r)
+        except HTTPException as exc:
+            failed.append({"index": idx, "error": exc.detail})
+        except Exception as exc:                          # noqa: BLE001
+            failed.append({"index": idx, "error": f"{type(exc).__name__}: {exc}"})
+    return {"count": len(ok), "failed": failed, "items": ok}
+
+
 @router.post("/compose")
 def compose_question(body: ComposeIn, db: Session = Depends(get_db)):
     from ..services import compose_render
@@ -489,8 +808,10 @@ def get_compose(question_id: int, db: Session = Depends(get_db)):
     q = db.get(Question, question_id)
     if not q:
         raise HTTPException(404, "题目不存在")
+    lay = q.layout or {"blocks": []}
+    kind = str(lay.get("kind") or "canvas")
     return {
-        "id": q.id, "layout": q.layout or {"blocks": []},
+        "id": q.id, "layout": lay, "layout_kind": kind,
         "answer_layout": q.answer_layout or {"blocks": []},
         "book_id": q.book_id, "unit_id": q.unit_id, "q_type": q.q_type,
         "difficulty": q.difficulty, "tags": q.tags or [], "answer": q.answer or "",
@@ -498,10 +819,11 @@ def get_compose(question_id: int, db: Session = Depends(get_db)):
         "source_title": q.source_title or "", "source_citation": q.source_citation or "",
         "locator": q.source_page or "", "status": q.status,
         "stem_text": ((q.layout or {}).get("meta") or {}).get("stem_text", ""),
-        "stem_image": next((i.get("path") for i in q.images or []), None),
+        "stem_image": (None if kind == "text"
+                       else next((i.get("path") for i in q.images or []), None)),
         "stem_image2": None,
-        "answer_images": [i.get("path") for i in (q.images or [])
-                          if (i.get("caption") or "") == "答案"],
+        "answer_images": [] if kind == "text" else [i.get("path") for i in (q.images or [])
+                                                    if (i.get("caption") or "") == "答案"],
     }
 
 

@@ -24,24 +24,45 @@ if not defined PYVER set "PYVER=3.x"
 echo [1/4] Python %PYVER%  OK
 
 rem ---------- 2. 校验 .venv（缺包 / ABI 不匹配都会自愈） ----------
+set "DEPS=fastapi, uvicorn, fitz, PIL, docx, httpx, rapidocr_onnxruntime, jinja2"
 set "VENV_OK="
+set "VENV_PARTIAL="
 if exist "%PY%" (
-  "%PY%" -c "import fastapi, uvicorn, fitz, PIL, docx, httpx, rapidocr_onnxruntime" >nul 2>nul
+  "%PY%" -c "import %DEPS%" >nul 2>nul
   if not errorlevel 1 set "VENV_OK=1"
+  "%PY%" -c "import fastapi" >nul 2>nul
+  if not errorlevel 1 set "VENV_PARTIAL=1"
 )
 if defined VENV_OK goto :venv_ready
+
+if defined VENV_PARTIAL (
+  echo [2/4] 运行环境缺少部分依赖，正在补齐 ...
+  "%PY%" -m pip install -r apps\api\requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+  "%PY%" -c "import %DEPS%" >nul 2>nul
+  if not errorlevel 1 goto :venv_ready
+  echo [提示] 补齐失败，改为整体重建 ...
+)
 
 echo [2/4] 运行环境缺失或与 Python 版本不匹配，正在重建 .venv ...
 if exist ".venv" rmdir /s /q ".venv"
 %BASEPY% -m venv .venv
 if errorlevel 1 goto :venv_fail
-"%PY%" -m pip install --upgrade pip -q -i https://pypi.tuna.tsinghua.edu.cn/simple
-"%PY%" -m pip install -q -r apps\api\requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+if not exist "%PY%" goto :venv_fail
+"%PY%" -m pip --version >nul 2>nul
+if errorlevel 1 (
+  echo [提示] .venv 里没有 pip，正在修复 ...
+  "%PY%" -m ensurepip --upgrade
+)
+"%PY%" -m pip --version >nul 2>nul
+if errorlevel 1 goto :venv_fail
+echo [2/4] 正在下载依赖，第一次安装需要几分钟，请不要关闭这个窗口 ...
+"%PY%" -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple
+"%PY%" -m pip install -r apps\api\requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 if errorlevel 1 (
   echo [提示] 清华镜像安装失败，改用官方源重试 ...
-  "%PY%" -m pip install -q -r apps\api\requirements.txt
+  "%PY%" -m pip install -r apps\api\requirements.txt
 )
-"%PY%" -c "import fastapi, uvicorn, fitz, PIL, docx, httpx, rapidocr_onnxruntime" >nul 2>nul
+"%PY%" -c "import %DEPS%" >nul 2>nul
 if errorlevel 1 goto :venv_fail
 > ".venv\.deps-ok" echo %PYVER%
 echo [2/4] 环境已重建  OK

@@ -170,7 +170,6 @@ function clearAll() {
       <span class="muted">插入到：</span>
       <button class="primary" @click="send('stem')">题干</button>
       <button @click="send('answer')">答案</button>
-      <button @click="send('analysis')">解析</button>
       <button class="ghost" @click="clearAll">清空</button>
       <span class="muted" style="margin-left:auto">Ctrl+Enter = 插入题干</span>
     </div>

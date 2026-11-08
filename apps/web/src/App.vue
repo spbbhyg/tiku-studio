@@ -1,6 +1,6 @@
 <script setup>
-import { onMounted, ref } from 'vue'
-import { api } from './api.js'
+import { ref } from 'vue'
+import { tasks, dropToast } from './tasks.js'
 
 const open = ref(false)
 const navOpen = ref(localStorage.getItem('tiku-nav-open') !== '0')
@@ -11,32 +11,23 @@ function toggleNav() {
 
 const navs = [
   { path: '/', label: '首页' },
-  { path: '/v2/editor', label: '题组编辑 v2' },
   { path: '/author', label: '出题' },
   { path: '/reader', label: '精读' },
   { path: '/smart', label: '智能出题' },
   { path: '/questions', label: '题库' },
+  { path: '/exam', label: '出整卷' },
+  { path: '/ingest', label: '整卷导入' },
   { path: '/papers', label: '试卷' },
-  { path: '/quizforge', label: 'QF题库' },
+  { path: '/wrong', label: '错题集' },
   { path: '/settings', label: '设置' },
 ]
-
-// 侧边栏直接铺出 quizforge.db 里的题库，点一下就到导入页
-const qfBanks = ref([])
-
-onMounted(async () => {
-  try {
-    const d = await api.get('/api/import/quizforge')
-    qfBanks.value = d.banks || []
-  } catch (e) { /* 没有 quizforge 时不影响其它页面 */ }
-})
 </script>
 
 <template>
   <div class="layout" :class="{ narrow: !navOpen }">
     <aside class="sidebar" :class="{ open, collapsed: !navOpen }" @click="open = false">
       <div class="logo">
-        <span class="wordmark">tiku-studio<small>题库 · 对纲 · 组卷</small></span>
+        <span class="wordmark">神奋<small>题库 · 对纲 · 组卷</small></span>
         <button class="fold" :title="navOpen ? '收起导航' : '展开导航'" @click.stop="toggleNav">
           {{ navOpen ? '«' : '»' }}
         </button>
@@ -46,27 +37,57 @@ onMounted(async () => {
           <router-link :to="n.path" :title="n.label">
             <span class="ic">{{ n.label.slice(0, 1) }}</span><span class="lbl">{{ n.label }}</span>
           </router-link>
-          <div v-if="n.path === '/quizforge' && qfBanks.length" class="subnav">
-            <router-link v-for="b in qfBanks" :key="b.id"
-                         :to="{ path: '/quizforge', query: { bank: b.id } }"
-                         :title="b.source_file || b.name">
-              <span class="dot" :class="{ done: b.imported }"></span>{{ b.name }}
-            </router-link>
-          </div>
         </template>
       </nav>
     </aside>
     <div class="topbar">
       <button @click="open = !open">☰</button>
-      <b>tiku-studio</b>
+      <b>神奋</b>
     </div>
     <main class="main" @click="open = false">
       <router-view />
     </main>
+
+    <!-- 全局任务条：长任务切页面也不会丢 -->
+    <div v-if="tasks.running.length" class="gtask">
+      <span class="dot" />
+      <span>{{ tasks.running[0].title }}</span>
+    </div>
+
+    <!-- 全局提示：切到别的页面也还看得到 -->
+    <div class="gtoasts">
+      <div v-for="t in tasks.toasts" :key="t.id" class="gtoast" :class="t.kind"
+           @click="dropToast(t.id)">
+        {{ t.text }}
+      </div>
+    </div>
   </div>
 </template>
 
 <style scoped>
+.gtask {
+  position: fixed; left: 50%; transform: translateX(-50%); bottom: 76px; z-index: 60;
+  display: flex; align-items: center; gap: 8px;
+  background: #fff; border: 1px solid #e4e7ec; border-radius: 999px;
+  padding: 7px 14px; font-size: 12.5px; color: #344054;
+  box-shadow: 0 6px 20px rgba(16, 24, 40, .08);
+}
+.gtask .dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--brand, #2e6bff);
+  animation: gpulse 1s ease-in-out infinite;
+}
+@keyframes gpulse { 0%, 100% { opacity: .35 } 50% { opacity: 1 } }
+.gtoasts {
+  position: fixed; left: 50%; transform: translateX(-50%); bottom: 18px; z-index: 70;
+  display: flex; flex-direction: column; gap: 8px; max-width: 360px;
+}
+.gtoast {
+  background: #ecfdf3; border: 1px solid #abefc6; color: #067647;
+  border-radius: 10px; padding: 9px 13px; font-size: 13px; line-height: 1.6;
+  box-shadow: 0 8px 24px rgba(16, 24, 40, .10); cursor: pointer;
+}
+.gtoast.bad { background: #fef3f2; border-color: #fecdca; color: #b42318; }
+
 .logo { display: flex; align-items: flex-start; gap: 6px; }
 .wordmark { flex: 1; min-width: 0; }
 .fold {

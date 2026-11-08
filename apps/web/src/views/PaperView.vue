@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '../api.js'
+import PaperExport from '../components/PaperExport.vue'
 
 const route = useRoute()
 const paper = ref(null)
@@ -24,6 +25,7 @@ const sections = computed(() => {
   return Object.entries(by).map(([t, items]) => ({ type: t, items }))
 })
 const isCanvas = computed(() => !!(paper.value && paper.value.config && paper.value.config.source === 'canvas'))
+const isManual = computed(() => !!(paper.value && paper.value.config && paper.value.config.kind === 'manual'))
 const canvasImg = computed(() => (paper.value && paper.value.config && paper.value.config.image) || '')
 
 const scoreSum = computed(() => (paper.value ? paper.value.items.reduce((s, i) => s + i.score, 0) : 0))
@@ -69,6 +71,10 @@ function openView(part) {
   if (w) logExport('html', `${paper.value.title}-${part}.html`, 0)
 }
 
+function countSubs(arr) {
+  return (arr || []).reduce((a, s) => a + 1 + countSubs(s.subs), 0)
+}
+
 function toggleAns(item) {
   showAns.value[item.id] = !showAns.value[item.id]
 }
@@ -84,7 +90,7 @@ onMounted(async () => {
   <template v-if="paper && isCanvas">
     <div class="btnrow" style="margin-bottom:12px">
       <a :href="`#/compose/canvas?id=${paper.id}`"><button class="primary">继续编排</button></a>
-      <button @click="downloadPdf(`/api/papers/${paper.id}/export-canvas`, paper.title)">下载 PDF</button>
+      <PaperExport :paper-id="paper.id" :title="paper.title" :cfg="paper.config || {}" />
       <a href="#/compose/canvas"><button>新建一张</button></a>
       <a href="#/papers"><button>← 试卷列表</button></a>
     </div>
@@ -100,12 +106,40 @@ onMounted(async () => {
     </div>
   </template>
 
+  <template v-else-if="paper && isManual">
+    <div class="btnrow" style="margin-bottom:12px">
+      <a :href="`#/papers/${paper.id}/edit`"><button class="primary">继续编辑</button></a>
+      <PaperExport :paper-id="paper.id" :title="paper.title" :cfg="paper.config || {}" primary />
+      <a :href="`/api/exam/papers/${paper.id}/view?part=questions`" target="_blank"><button>题目卷预览</button></a>
+      <a :href="`/api/exam/papers/${paper.id}/view?part=answers`" target="_blank"><button>答案卷预览</button></a>
+      <a href="#/papers"><button>← 试卷列表</button></a>
+    </div>
+    <div class="card">
+      <h2 style="text-align:center">{{ paper.title }}</h2>
+      <p class="muted" style="text-align:center">
+        人工整卷 · {{ paper.items.length }} 道大题 · 总分 {{ paper.total_score }} 分 · 限时 {{ paper.duration_minutes }} 分钟
+      </p>
+    </div>
+    <div class="card">
+      <table class="table">
+        <tr><th>题号</th><th>大题</th><th>分值</th><th>小问数</th></tr>
+        <tr v-for="(it, i) in paper.items" :key="it.id">
+          <td>{{ i + 1 }}</td>
+          <td>{{ it.snapshot.title || '（未命名）' }}</td>
+          <td>{{ it.score }}</td>
+          <td>{{ countSubs(it.snapshot.subs) }}</td>
+        </tr>
+      </table>
+    </div>
+  </template>
+
   <template v-else-if="paper">
     <div class="btnrow" style="margin-bottom:12px">
       <a href="#/questions"><button>← 再组一卷</button></a>
       <button class="primary" @click="openView('questions')">题目卷（可编辑/打印）</button>
       <button @click="openView('answers')">答案卷（可编辑/打印）</button>
-      <a :href="`/api/papers/${paper.id}/view`" target="_blank"><button>题目+答案合卷</button></a>
+      <button @click="openView('all')">题目+答案合卷</button>
+      <PaperExport :paper-id="paper.id" :title="paper.title" :cfg="paper.config || {}" primary />
       <a href="#/papers"><button>← 试卷列表</button></a>
     </div>
     <div class="card">

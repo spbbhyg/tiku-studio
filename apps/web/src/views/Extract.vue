@@ -11,6 +11,7 @@ const bookId = ref(null)
 const label = ref('')
 const files = ref([])
 const busy = ref(false)
+const mode = ref('text')   // text=文字拆题，image=按题号裁图
 const err = ref('')
 const result = ref(null)
 const dropHot = ref(false)
@@ -42,10 +43,23 @@ async function run() {
     files.value.forEach(f => fd.append('files', f))
     if (bookId.value) fd.append('book_id', String(bookId.value))
     fd.append('label', label.value || '')
-    result.value = await api.postForm('/api/wb/extract', fd)
+    const url = mode.value === 'image' ? '/api/wb/extract-images' : '/api/wb/extract'
+    try {
+      result.value = await api.postForm(url, fd)
+    } catch (e1) {
+      // 服务刚重启/网络瞬断时 fetch 会直接 Failed to fetch：等 3 秒重试一次
+      if (e1 instanceof TypeError) {
+        err.value = '连接服务失败，3 秒后自动重试…'
+        await new Promise((resolve) => setTimeout(resolve, 3000))
+        result.value = await api.postForm(url, fd)
+        err.value = ''
+      } else { throw e1 }
+    }
     emit('done', result.value)
   } catch (e) {
-    err.value = e.message
+    err.value = (e instanceof TypeError)
+      ? '连接不上服务：确认 http://127.0.0.1:8100 在运行；扫描件很多时请分批导入。'
+      : e.message
   } finally { busy.value = false }
 }
 </script>
@@ -55,8 +69,8 @@ async function run() {
     <h2>批量拆题</h2>
   </template>
   <p class="muted" :class="{ tight: props.embedded }">
-    一次放多份 PDF（试卷 / 习题册），系统逐份拆成题目入库：题干、选项、答案、解析一起带走；
-    没写答案的题会让 AI 补，找不到就留空不瞎编。
+    一次放多份 PDF（题目卷 / 答案卷 / 习题册）。同一大题下的 1-1、1-2、1-3… 会合成一道题；
+    题目卷和答案卷一起选进来时，会按大题号把答案配到对应题目。
   </p>
 
   <div class="card">
@@ -81,10 +95,18 @@ async function run() {
     </div>
 
     <div class="row">
+      <label class="chk"><input v-model="mode" type="radio" value="text" /> 文字拆题（题干/答案/解析）</label>
+      <label class="chk"><input v-model="mode" type="radio" value="image" /> 按题号裁图（扫描件推荐）</label>
+    </div>
+    <p v-if="mode === 'image'" class="muted">
+      按「1. / 第1题」这样的题号自动切页、裁图、去白边；同一大题的 1-1、1-2… 会裁成一整张。
+      题目卷和答案卷一起选进来即可按大题号配对，答案图会跟题存入。扫描页需要先 OCR，会慢一些。
+    </p>
+    <div class="row">
       <button class="primary" :disabled="busy || !files.length" @click="run">
-        {{ busy ? '拆解中（一份约 1-2 分钟）…' : `开始拆题（${files.length} 份）` }}
+        {{ busy ? (mode === 'image' ? '正在按题号裁图（扫描页较慢）…' : '拆解中（一份约 1-2 分钟）…') : `开始拆题（${files.length} 份）` }}
       </button>
-      <span v-if="busy" class="muted">AI 正在逐份阅读，别关页面…</span>
+      <span v-if="busy" class="muted">后台处理中，别关页面…</span>
     </div>
   </div>
 

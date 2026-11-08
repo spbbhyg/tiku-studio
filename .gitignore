@@ -24,3 +24,20 @@ Thumbs.db
 # 编辑器
 .idea/
 .vscode/
+
+# 打包 / 运行时产物（体积大，仓库里不存）
+dist-app/
+runtime/
+build/
+dist/
+desktop/
+*.exe
+*.7z
+
+# 本地数据库与导出
+*.db-wal
+*.db-shm
+data/*.bak
+
+# 第三方内置模型服务（打包时单独提供，不入库）
+services/ofm/

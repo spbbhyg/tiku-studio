@@ -22,7 +22,7 @@ const selIds = ref([])
 const clip = ref([])
 const editingId = ref('')
 const scale = ref(1)
-const autoAlign = ref(true)
+const autoAlign = ref(false)   // 默认不吸附，保留画布上的手动排版
 const trimBlank = ref(true)
 const fontTarget = ref(12)          // 统一字号（pt）
 const textColor = ref('#111111')    // 文字颜色（选中块或新建块）
@@ -33,6 +33,13 @@ const metaOpen = ref(false)
 const marquee = ref(null)
 const charSel = ref(null)            // 文字块内的字符选区：{ id, start, end, text }
 const tr = reactive({ open: false, text: '', trans: '', target: '简体中文', busy: false, err: '', msg: '' })
+const region = reactive({ open: false, text: '', path: '', busy: false, err: '' })
+const erase = reactive({ open: false, path: '', brush: 26, busy: false })
+const eraseCanvas = ref(null)
+const imgPick = ref(null)            // 固定图片左键拖选：{ id, x0, y0, x1, y1 }（页面坐标）
+let eraserBlockId = ''
+let eraserImg = null
+let erasing = false
 const band = reactive({ header_left: '', header_center: '', header_right: '', footer_center: '', name_line: false })
 const hasMeta = computed(() => !!(band.header_left || band.header_center || band.header_right || band.footer_center || band.name_line))
 
@@ -296,6 +303,201 @@ function clearSel() { selectedId.value = ''; selIds.value = []; editingId.value 
 function selectAll() {
   if (blocks.value.length) selectBlocks(blocks.value)
 }
+function pickStyle(p) {
+  if (!p) return {}
+  return {
+    left: Math.min(p.x0, p.x1) * scale.value + 'px',
+    top: Math.min(p.y0, p.y1) * scale.value + 'px',
+    width: Math.abs(p.x1 - p.x0) * scale.value + 'px',
+    height: Math.abs(p.y1 - p.y0) * scale.value + 'px',
+  }
+}
+
+function startLockedRegion(e, b) {
+  const host = canvasEl.value?.getBoundingClientRect()
+  if (!host) return
+  const sx = clamp((e.clientX - host.left) / scale.value, b.x, b.x + (b.w || 0))
+  const sy = clamp((e.clientY - host.top) / scale.value, b.y, b.y + (b.h || b.w * 0.4))
+  let moved = false
+  const move = (ev) => {
+    const x = clamp((ev.clientX - host.left) / scale.value, b.x, b.x + (b.w || 0))
+    const y = clamp((ev.clientY - host.top) / scale.value, b.y, b.y + (b.h || b.w * 0.4))
+    if (Math.abs(x - sx) > 3 || Math.abs(y - sy) > 3) moved = true
+    if (moved) imgPick.value = { id: b.id, x0: sx, y0: sy, x1: x, y1: y }
+  }
+  const up = async () => {
+    window.removeEventListener('pointermove', move)
+    window.removeEventListener('pointerup', up)
+    const p = imgPick.value
+    imgPick.value = null
+    if (!moved || !p) { selectOnly(b.id); return }
+    const w = Math.abs(p.x1 - p.x0), h = Math.abs(p.y1 - p.y0)
+    if (w < 4 || h < 4) return
+    const rect = [
+      (Math.min(p.x0, p.x1) - b.x) / b.w,
+      (Math.min(p.y0, p.y1) - b.y) / (b.h || b.w * 0.4),
+      (Math.max(p.x0, p.x1) - b.x) / b.w,
+      (Math.max(p.y0, p.y1) - b.y) / (b.h || b.w * 0.4),
+    ]
+    tip.value = '正在裁出选区…'
+    try {
+      const r = await api.post('/api/manual/image-region', { path: b.path, rect, ocr: false, erase_source: true })
+      if (r.erased_path) b.path = r.erased_path
+      const nb = await addImage(r.path, b.x + (rect[0] + rect[2]) / 2 * b.w, b.y + (rect[1] + rect[3]) / 2 * (b.h || b.w * 0.4))
+      if (nb) {
+        nb.x = Math.round(b.x + rect[0] * b.w)
+        nb.y = Math.round(b.y + rect[1] * (b.h || b.w * 0.4))
+        nb.w = Math.max(24, Math.round(w))
+        nb.h = Math.max(18, Math.round(h))
+        selectOnly(nb.id)
+      }
+      tip.value = '已把选区裁成独立图片：可复制、橡皮擦修改或「图片转文字」'
+      emit('changed')
+    } catch (err) {
+      tip.value = '选区裁剪失败：' + (err.message || err)
+    }
+  }
+  window.addEventListener('pointermove', move)
+  window.addEventListener('pointerup', up)
+}
+
+function startRegion(e) {
+  if (e.button !== 2) return
+  const host = canvasEl.value?.getBoundingClientRect()
+  if (!host) return
+  const sx = (e.clientX - host.left) / scale.value
+  const sy = (e.clientY - host.top) / scale.value
+  const b = [...blocks.value].reverse().find((x) => x.type === 'image' && x.locked
+    && sx >= x.x && sx <= x.x + (x.w || 0)
+    && sy >= x.y && sy <= x.y + (x.h || x.w * 0.4))
+  if (!b) return
+  e.preventDefault()
+  imgPick.value = { id: b.id, x0: sx, y0: sy, x1: sx, y1: sy }
+  const move = (ev) => {
+    if (!imgPick.value || imgPick.value.id !== b.id) return
+    const x = clamp((ev.clientX - host.left) / scale.value, b.x, b.x + (b.w || 0))
+    const y = clamp((ev.clientY - host.top) / scale.value, b.y, b.y + (b.h || b.w * 0.4))
+    imgPick.value = { ...imgPick.value, x1: x, y1: y }
+  }
+  const up = async () => {
+    window.removeEventListener('pointermove', move)
+    window.removeEventListener('pointerup', up)
+    const p = imgPick.value
+    imgPick.value = null
+    if (!p) return
+    const w = Math.abs(p.x1 - p.x0), h = Math.abs(p.y1 - p.y0)
+    if (w < 4 || h < 4) return
+    const rect = [
+      (Math.min(p.x0, p.x1) - b.x) / b.w,
+      (Math.min(p.y0, p.y1) - b.y) / (b.h || b.w * 0.4),
+      (Math.max(p.x0, p.x1) - b.x) / b.w,
+      (Math.max(p.y0, p.y1) - b.y) / (b.h || b.w * 0.4),
+    ]
+    region.open = true; region.busy = true; region.err = ''; region.text = ''; region.path = ''
+    try {
+      const r = await api.post('/api/manual/image-region', { path: b.path, rect, ocr: true })
+      region.path = r.path || ''
+      region.text = r.text || ''
+      if (!region.text) region.err = '这一小块没识别出文字；可放大 PDF 后再截图，或直接复制图片。'
+    } catch (err) {
+      region.err = err.message || String(err)
+    } finally {
+      region.busy = false
+    }
+  }
+  window.addEventListener('pointermove', move)
+  window.addEventListener('pointerup', up)
+}
+
+async function openEraser() {
+  const b = selected.value
+  if (!b || b.type !== 'image') { tip.value = '先选中一张图片，再点「橡皮擦」'; return }
+  eraserBlockId = b.id
+  erase.open = true
+  erase.path = b.path
+  await nextTick()
+  const cv = eraseCanvas.value
+  if (!cv) return
+  eraserImg = new Image()
+  eraserImg.onload = () => {
+    cv.width = eraserImg.naturalWidth
+    cv.height = eraserImg.naturalHeight
+    const ctx = cv.getContext('2d')
+    ctx.drawImage(eraserImg, 0, 0)
+  }
+  eraserImg.src = imgUrl(b.path)
+}
+
+function eraserPos(e) {
+  const cv = eraseCanvas.value
+  const r = cv.getBoundingClientRect()
+  return {
+    x: (e.clientX - r.left) * cv.width / r.width,
+    y: (e.clientY - r.top) * cv.height / r.height,
+  }
+}
+
+function eraserDown(e) {
+  if (!eraseCanvas.value) return
+  erasing = true
+  e.preventDefault()
+  const ctx = eraseCanvas.value.getContext('2d')
+  const p = eraserPos(e)
+  ctx.strokeStyle = '#ffffff'
+  ctx.lineWidth = erase.brush * (eraseCanvas.value.width / eraseCanvas.value.getBoundingClientRect().width)
+  ctx.lineCap = 'round'
+  ctx.lineJoin = 'round'
+  ctx.beginPath()
+  ctx.moveTo(p.x, p.y)
+  ctx.lineTo(p.x + 0.1, p.y + 0.1)
+  ctx.stroke()
+}
+
+function eraserMove(e) {
+  if (!erasing || !eraseCanvas.value) return
+  const ctx = eraseCanvas.value.getContext('2d')
+  const p = eraserPos(e)
+  ctx.lineWidth = erase.brush * (eraseCanvas.value.width / eraseCanvas.value.getBoundingClientRect().width)
+  ctx.strokeStyle = '#ffffff'
+  ctx.lineCap = 'round'
+  ctx.lineTo(p.x, p.y)
+  ctx.stroke()
+}
+
+function eraserUp() { erasing = false }
+
+async function eraserSave() {
+  const cv = eraseCanvas.value
+  if (!cv) return
+  erase.busy = true
+  try {
+    const r = await api.post('/api/manual/image', { data_url: cv.toDataURL('image/png') })
+    const b = blocks.value.find((x) => x.id === eraserBlockId)
+    if (b) { b.path = r.path; emit('changed'); tip.value = '已擦除并替换图片；原图仍在图库，不会丢' }
+    erase.open = false
+  } catch (err) {
+    tip.value = '保存失败：' + (err.message || err)
+  } finally {
+    erase.busy = false
+  }
+}
+
+function regionInsert() {
+  if (!region.text.trim()) return
+  addTextFlow(flowText(region.text))
+  region.open = false
+  tip.value = '已插入识别文字；可在画布里直接改'
+}
+
+async function regionCopy() {
+  try {
+    await navigator.clipboard.writeText(region.text)
+    tip.value = '识别文字已复制'
+  } catch (err) {
+    tip.value = '复制失败，请手动选中文字复制'
+  }
+}
+
 function pageDown(e) {
   if (e.button !== 0) return
   emit('activate')
@@ -347,6 +549,70 @@ function groupSel() {
 function ungroupSel() {
   for (const b of blocks.value) if (isSel(b.id) && b.gid) b.gid = null
   emit('changed')
+}
+
+// ---------- 拼接：多张图拼成一张 / 多段文字合并成一段 ----------
+const stitchBusy = ref(false)
+async function stitchSel() {
+  const list = blocks.value.filter((b) => isSel(b.id))
+  if (list.length < 2) { tip.value = '先选中至少 2 个元素，再点拼接'; return }
+  const imgs = list.filter((b) => b.type === 'image')
+  const texts = list.filter((b) => b.type === 'text')
+
+  if (imgs.length === list.length) {
+    if (stitchBusy.value) return
+    const sorted = imgs.slice().sort((a, b) => (a.y - b.y) || (a.x - b.x))
+    const c0 = sorted[0].y + (sorted[0].h || 0) / 2
+    const sameRow = sorted.every((b) => Math.abs((b.y + (b.h || 0) / 2) - c0) < 24)
+    const dir = sameRow ? 'h' : 'v'
+    stitchBusy.value = true
+    tip.value = '正在拼接图片…'
+    try {
+      const r = await api.post('/api/wb/stitch', { paths: sorted.map((b) => b.path), direction: dir, gap: 10 })
+      const x = Math.min(...sorted.map((b) => b.x))
+      const y = Math.min(...sorted.map((b) => b.y))
+      const w = Math.max(24, Math.max(...sorted.map((b) => b.x + (b.w || 0))) - x)
+      const h = Math.max(12, Math.round(Number(r.height || 1) / Math.max(1, Number(r.width || 1)) * w))
+      const ids = new Set(sorted.map((b) => b.id))
+      blocks.value = blocks.value.filter((b) => !ids.has(b.id))
+      // 拼完比页面还高就等比缩一下，避免新图直接溢出 A4
+      const maxH = Math.max(80, limit.value - y - 20)
+      let fw = w, fh = h
+      if (fh > maxH) { const k = maxH / fh; fw = Math.max(60, Math.round(w * k)); fh = Math.round(h * k) }
+      const nb = reactive({ id: uid(), type: 'image', path: r.path, x, y, w: fw, h: fh, rotate: 0, locked: false })
+      blocks.value.push(nb)
+      selectOnly(nb.id)
+      tip.value = `已把 ${sorted.length} 张图拼成一张（${dir === 'v' ? '竖向' : '横向'}）`
+      emit('changed')
+    } catch (e) {
+      tip.value = '拼接失败：' + (e.message || e)
+    } finally {
+      stitchBusy.value = false
+    }
+    return
+  }
+
+  if (texts.length === list.length) {
+    // 按阅读顺序（先上后下、先左后右）合并成一段，保留第一段的字号/对齐/颜色
+    const sorted = texts.slice().sort((a, b) => (a.y - b.y) || (a.x - b.x))
+    const first = sorted[0]
+    const merged = sorted.map((b) => String(b.text || '').trim()).filter(Boolean).join('\n')
+    const x = Math.min(...sorted.map((b) => b.x))
+    const y = Math.min(...sorted.map((b) => b.y))
+    const right = Math.max(...sorted.map((b) => b.x + (b.w || 0)))
+    const ids = new Set(sorted.slice(1).map((b) => b.id))
+    first.text = flowText(merged)
+    first.x = x
+    first.y = y
+    first.w = Math.max(80, right - x)
+    blocks.value = blocks.value.filter((b) => !ids.has(b.id))
+    selectOnly(first.id)
+    tip.value = `已合并 ${sorted.length} 段文字（保留第一段的字号与颜色）`
+    emit('changed')
+    return
+  }
+
+  tip.value = '拼接只支持「全是图片」或「全是文字」；图文混选请先分组'
 }
 function copySel() {
   const list = blocks.value.filter((b) => isSel(b.id))
@@ -486,7 +752,7 @@ function reflowSelected() {
   for (const b of targets) {
     const next = flowText(b.text || '')
     if (next !== b.text) { b.text = next; n += 1 }
-    if (b.align !== 'justify' && b.align !== 'center' && b.align !== 'right') b.align = 'justify'
+    if (b.align !== 'center' && b.align !== 'right' && b.align !== 'justify') b.align = 'justify'
   }
   tip.value = n ? `已连句 ${n} 段：按整段重新排版` : '选中的文字已经是整段，不用再连句'
   emit('changed')
@@ -567,8 +833,23 @@ async function unifyFonts() {
   tip.value = `已把 ${imgs.length} 张图统一到 ${fontTarget.value}pt 并左对齐`
 }
 
-function applyColor() {
+async function applyColor() {
   if (applyCharColor(textColor.value)) return
+  // 图片块：把近黑线条染成目标色（结构式变红等）
+  const pics = blocks.value.filter((b) => b.type === 'image' && isSel(b.id))
+  if (pics.length) {
+    tip.value = '正在染色…'
+    let done = 0
+    for (const b of pics) {
+      try {
+        const r = await api.post('/api/wb/recolor', { path: b.path, color: textColor.value })
+        if (r && r.path) { b.path = r.path; b.cache = ''; done += 1 }
+      } catch (e) { /* 忽略单张失败 */ }
+    }
+    tip.value = done ? `已把 ${done} 张图染成 ${textColor.value}` : '染色失败，稍后再试'
+    if (done) emit('changed')
+    return
+  }
   const targets = blocks.value.filter((b) => b.type === 'text' && isSel(b.id))
   if (!targets.length) {
     tip.value = `已把新建文字的颜色设为 ${textColor.value}；选中文字块后再点「上色」可改已有文字`
@@ -671,7 +952,14 @@ function onBlkDown(e, b) {
   if (t && t.closest && (t.closest('.grip') || t.closest('.handle'))) return
   if (t && t.closest && t.closest('.tt')) {
     // 点在文字上：交给浏览器做原生选区（可只选一个字），不启动拖动
+    // Shift+点击 = 加入/移出多选（拼接、合并文字要用到）
+    if (e.shiftKey) { toggleSel(b); return }
     if (!isSel(b.id)) { selectedId.value = b.id; selIds.value = [b.id] }
+    return
+  }
+  if (b.type === 'image' && b.locked) {
+    selectOnly(b.id)
+    startLockedRegion(e, b)
     return
   }
   startDrag(e, b)
@@ -722,7 +1010,8 @@ const canvasEl = ref(null)
 function fitScale() {
   const host = canvasEl.value ? canvasEl.value.parentElement : null
   const w = host ? host.clientWidth : 760
-  scale.value = clamp((w - 48) / PW, 0.35, 1.15)
+  // 让 A4 画布铺满可用宽度（原来上限 1.15，宽屏下左右会空出一大块）
+  scale.value = clamp(w / PW, 0.35, 2.6)
 }
 let ro = null
 onMounted(() => { fitScale(); ro = new ResizeObserver(fitScale); if (canvasEl.value?.parentElement) ro.observe(canvasEl.value.parentElement) })
@@ -771,7 +1060,9 @@ function setLayout(layout) {
 }
 function clear() { blocks.value = []; clearSel(); clip.value = [] }
 
-defineExpose({ getLayout, setLayout, addImage, clear, rotateSel, copySel, pasteClip, groupSel, ungroupSel, removeSelected, clearSel, nudge, addText, addTextFlow, reflowSelected, unifyFonts, selectAll, bumpSize, imageToText })
+defineExpose({ getLayout, setLayout, addImage, clear, rotateSel, copySel, pasteClip, groupSel, ungroupSel, stitchSel, removeSelected, clearSel, nudge, addText, addTextFlow, reflowSelected, unifyFonts, selectAll, bumpSize, imageToText })
+
+import Icon from './Icon.vue'
 </script>
 
 <template>
@@ -781,13 +1072,12 @@ defineExpose({ getLayout, setLayout, addImage, clear, rotateSel, copySel, pasteC
       <span class="muted">{{ blocks.length }} 个元素 · {{ Math.round(pageHeight) }}pt</span>
       <span class="spacer"></span>
       <label class="chk" v-if="!collapsed"><input type="checkbox" v-model="autoAlign" /> 自动对齐</label>
-      <label class="chk" v-if="!collapsed" title="保存时按内容裁掉下方空白"><input type="checkbox" v-model="trimBlank" /> 裁空白</label>
       <span class="muted" v-if="!collapsed" style="margin-left:8px">字号</span>
       <input v-if="!collapsed" v-model.number="fontTarget" type="number" min="6" max="24" step="0.5"
              style="width:56px;padding:3px 6px" title="统一到多少 pt" />
       <span class="muted" v-if="!collapsed" style="margin-left:8px">颜色</span>
       <input v-if="!collapsed" v-model="textColor" type="color" class="colorin" title="文字颜色" @change="applyColor" />
-      <button class="ghost sm" v-if="!collapsed" @click="applyColor" title="给选中的文字块上色；未选中时选的颜色用于新插入的文字">上色</button>
+      <button class="ghost sm" v-if="!collapsed" @click="applyColor" title="给选中的文字块上色；选中图片则把它染成这个颜色；未选中时用于新插入的文字">上色</button>
       <button class="ghost sm" v-if="!collapsed" @click="unifyFonts" title="按测得字号统一并左对齐">统一字号</button>
       <button class="icon" :title="collapsed ? '展开' : '收起'" @click="collapsed = !collapsed">{{ collapsed ? '▾' : '▴' }}</button>
     </header>
@@ -809,25 +1099,26 @@ defineExpose({ getLayout, setLayout, addImage, clear, rotateSel, copySel, pasteC
           <button class="icon" :class="{ on: selectedText && selectedText.align === 'right' }" @click="setAlign('right')">⇥</button>
         </div>
         <span class="tdiv"></span>
-        <button class="ghost trbtn" title="翻译选中的字/词/句（DeepSeek）" @click="openTranslate">翻译选中</button>
-        <button class="ghost" title="把所有文字块的首字左边缘对齐" @click="alignTextAll">对齐</button>
-        <button class="ghost" title="把选中的文字（单字/整段）统一为当前字号和颜色" @click="unifySelected">统一</button>
-        <button class="ghost" :disabled="!blocks.some((b) => b.type === 'text')" title="把硬换行连成整段：一段排满再换行" @click="reflowSelected">连句</button>
+        <button class="ghost trbtn" title="翻译选中的字/词/句（DeepSeek）" @click="openTranslate"><Icon name="translate" /><span class="lbl">翻译</span></button>
+        <button class="ghost" title="把所有文字块的首字左边缘对齐" @click="alignTextAll"><Icon name="align" /></button>
+        <button class="ghost" title="把选中的文字统一为当前字号和颜色" @click="unifySelected"><Icon name="unify" /></button>
+        <button class="ghost" :disabled="!blocks.some((b) => b.type === 'text')" title="把硬换行连成整段：一段排满再换行" @click="reflowSelected"><Icon name="join" /></button>
         <button v-if="selected && selected.type === 'image'" class="ghost" :class="{ on: selected.locked }"
                 :title="selected.locked ? '解锁后可以拖动、缩放图片' : '固定图片，避免选中文字时误拖动'"
-                @click="toggleLock">{{ selected.locked ? '解锁图片' : '固定图片' }}</button>
+                @click="toggleLock"><Icon :name="selected.locked ? 'unlock' : 'lock'" /></button>
         <button v-if="selected && selected.type === 'image'" class="ghost trbtn"
-                title="用本机 OCR 把这张图识别成可编辑文字（会替换图片）" @click="imageToText">图片转文字</button>
-        <button class="ghost" @click="addText('')">＋ 文本</button>
-        <button v-if="metaable" class="ghost" :class="{ on: metaOpen }" @click="metaOpen = !metaOpen">页眉页脚</button>
-        <button class="ghost" :disabled="!selected" @click="rotateSel">旋转 90°</button>
-        <button class="ghost" :disabled="!selIds.length" @click="copySel">复制</button>
-        <button class="ghost" :disabled="!clip.length" @click="pasteClip">粘贴</button>
-        <button class="ghost" :disabled="selIds.length < 2" @click="groupSel">组合</button>
-        <button class="ghost" :disabled="!selIds.length" @click="ungroupSel">拆分</button>
-        <button class="ghost" :disabled="!selIds.length" @click="removeSelected">
-          删除所选{{ selIds.length > 1 ? `(${selIds.length})` : '' }}
-        </button>
+                title="打开橡皮擦，把图片局部涂白（例如擦掉水印/旧答案）" @click="openEraser"><Icon name="eraser" /></button>
+        <button v-if="selected && selected.type === 'image'" class="ghost trbtn"
+                title="用本机 OCR 把这张图识别成可编辑文字（会替换图片）" @click="imageToText"><Icon name="ocr" /></button>
+        <button class="ghost" title="插入文本" @click="addText('')"><Icon name="text" /></button>
+        <button v-if="metaable" class="ghost" :class="{ on: metaOpen }" title="页眉页脚 / 姓名栏" @click="metaOpen = !metaOpen"><Icon name="header" /></button>
+        <button class="ghost" :disabled="!selected" title="旋转 90°" @click="rotateSel"><Icon name="rotate" /></button>
+        <button class="ghost" :disabled="!selIds.length" title="复制" @click="copySel"><Icon name="copy" /></button>
+        <button class="ghost" :disabled="!clip.length" title="粘贴" @click="pasteClip"><Icon name="paste" /></button>
+        <button class="ghost" :disabled="selIds.length < 2" title="拼接所选：多张图拼成一张，或多段文字合并成一段" @click="stitchSel"><Icon name="stitch" /></button>
+        <button class="ghost" :disabled="selIds.length < 2" title="组合" @click="groupSel"><Icon name="group" /></button>
+        <button class="ghost" :disabled="!selIds.length" title="拆分" @click="ungroupSel"><Icon name="ungroup" /></button>
+        <button class="ghost" :disabled="!selIds.length" title="删除所选" @click="removeSelected"><Icon name="trash" /></button>
       </div>
 
       <div v-if="tr.open" class="trbox">
@@ -874,6 +1165,7 @@ defineExpose({ getLayout, setLayout, addImage, clear, rotateSel, copySel, pasteC
              :style="{ width: PW * scale + 'px', height: pageHeight * scale + 'px' }"
              @dragover.prevent @drop.prevent="dropOnCanvas" @pointerdown.self="pageDown">
           <div v-if="marquee" class="marquee" :style="marqueeStyle"></div>
+          <div v-if="imgPick" class="imgpick" :style="pickStyle(imgPick)"></div>
           <div v-if="!blocks.length" class="empty">{{ hint }}</div>
           <div v-for="b in blocks" :key="b.id" class="blk"
                :class="{ sel: isSel(b.id), img: b.type === 'image', grouped: !!b.gid, locked: b.locked }"
@@ -906,6 +1198,22 @@ defineExpose({ getLayout, setLayout, addImage, clear, rotateSel, copySel, pasteC
         </div>
       </div>
     </div>
+
+    <div v-if="erase.open" class="mask" @pointerdown.self="erase.open = false">
+      <div class="ecard">
+        <div class="ehead"><b>橡皮擦 · 白色笔刷</b><span class="muted">把不要的内容涂白，保存后替换画布里的图片</span>
+          <span class="spacer"></span><button class="icon" @click="erase.open = false">✕</button></div>
+        <canvas ref="eraseCanvas" class="ecanvas" @pointerdown="eraserDown" @pointermove="eraserMove"
+                @pointerup="eraserUp" @pointerleave="eraserUp" @contextmenu.prevent></canvas>
+        <div class="erow">
+          <label class="chk">笔刷 <input v-model.number="erase.brush" type="range" min="8" max="90" step="2" /></label>
+          <button @click="openEraser">重置</button>
+          <span class="spacer"></span>
+          <button class="primary" :disabled="erase.busy" @click="eraserSave">{{ erase.busy ? '保存中…' : '保存并替换图片' }}</button>
+        </div>
+      </div>
+    </div>
+
   </section>
 </template>
 
@@ -923,8 +1231,9 @@ defineExpose({ getLayout, setLayout, addImage, clear, rotateSel, copySel, pasteC
 .cvhead { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid #eef1f6; }
 .cvhead b { font-size: 14px; }
 .cvpane.collapsed .cvhead { border-bottom: none; }
-.cvbody { padding: 10px 12px 12px; }
-.toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-bottom: 8px; }
+.cvbody { padding: 0; }
+.toolbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding-bottom: 8px; }
+.toolbar .ghost, .toolbar .icon { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; height: 28px; padding: 0 7px; }
 .tgroup { display: flex; align-items: center; gap: 4px; }
 .tgroup .lbl { font-size: 12px; color: #667085; }
 .tgroup .size { min-width: 22px; text-align: center; font-size: 12.5px; }
@@ -937,8 +1246,8 @@ defineExpose({ getLayout, setLayout, addImage, clear, rotateSel, copySel, pasteC
 .metabox { background: #f8fafc; border: 1px solid var(--line, #e7ebf2); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; }
 .bandrow { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 6px; }
 .bandrow input { flex: 1 1 180px; min-width: 140px; }
-.canvas-wrap { overscroll-behavior: contain; background: #f1f3f7; border-radius: 10px; padding: 14px; display: flex; justify-content: center; max-height: calc(100vh - 260px); overflow: auto; }
-.page { position: relative; background: #fff; box-shadow: 0 6px 24px rgba(16, 24, 40, .1); flex: 0 0 auto; }
+.canvas-wrap { overscroll-behavior: contain; background: #fff; border-radius: 10px; padding: 0; display: flex; justify-content: center; max-height: calc(100vh - 260px); overflow: auto; }
+.page { position: relative; background: #fff; box-shadow: none; flex: 0 0 auto; }
 .page .empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #98a2b3; font-size: 13px; text-align: center; padding: 0 40px; }
 .marquee { position: absolute; border: 1px dashed var(--brand, #2f6fed); background: rgba(47, 111, 237, .1); pointer-events: none; z-index: 5; }
 .blk { position: absolute; cursor: move; }
@@ -961,7 +1270,8 @@ defineExpose({ getLayout, setLayout, addImage, clear, rotateSel, copySel, pasteC
   background: #fff; border: 1px solid #e5e7eb; border-radius: 4px; padding: 2px; z-index: 6;
 }
 .blk.locked { cursor: default; }
-.blk.locked.img { pointer-events: none; }
+.blk.locked.img { cursor: crosshair; }
+.imgpick { position: absolute; border: 1.5px dashed #2f6fed; background: rgba(47,111,237,.10); pointer-events: none; z-index: 30; }
 .unlockpin {
   position: absolute; z-index: 8; width: 22px; height: 20px; padding: 0; line-height: 1;
   font-size: 11px; border: 1px solid #d6dfec; border-radius: 5px; background: #fff;
@@ -976,4 +1286,15 @@ defineExpose({ getLayout, setLayout, addImage, clear, rotateSel, copySel, pasteC
 .trtarget { width: auto; padding: 3px 6px; }
 .trmsg { font-size: 12px; color: #3b7a57; margin-top: 5px; }
 .trerr { font-size: 12px; color: var(--bad, #dc2626); margin-top: 5px; }
+
+.mask { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: flex; align-items: center; justify-content: center; z-index: 90; }
+.ecard { width: min(920px, 94vw); max-height: 92vh; overflow: auto; background: #fff; border-radius: 14px; padding: 14px 16px; box-shadow: 0 18px 60px rgba(15,23,42,.28); }
+.ehead { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.ehead .spacer { flex: 1; }
+.ecanvas { display: block; max-width: 100%; max-height: 62vh; margin: 0 auto; border: 1px solid var(--line); border-radius: 8px; cursor: crosshair; background: #fff; }
+.erow { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.erow .spacer { flex: 1; }
+.erow input[type="range"] { width: 160px; }
+.rpreview { text-align: center; margin-bottom: 8px; }
+.rpreview img { max-width: 100%; max-height: 34vh; border: 1px solid var(--line); border-radius: 8px; }
 </style>

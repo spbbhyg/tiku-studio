@@ -155,9 +155,12 @@ def _check_status(v: str | None, default: str = "draft") -> str:
 # ---------- 结构式渲染（RDKit 服务端） ----------
 def _render_structure(src: str, width: int = 240, height: int = 170) -> tuple[str, str]:
     """把 SMILES 或 MOL(V2000/V3000) 渲染成 SVG，返回 (svg, canonical_smiles)。"""
-    src = (src or "").strip()
-    if not src:
+    raw = src or ""
+    if not raw.strip():
         raise HTTPException(400, "结构式内容为空")
+    # 不能 lstrip：MOL 文件前三行是标题/程序/空行，去掉行首空行会让
+    # RDKit 把原子数行当成标题行，报 “Cannot convert ... to unsigned int”。
+    src = raw.rstrip()
     try:
         from rdkit import Chem
         from rdkit.Chem import AllChem

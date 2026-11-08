@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import String, cast, func, or_, select, text
 from sqlalchemy.orm import Session
 
@@ -6,6 +7,7 @@ from ..db import get_db
 from ..models import Book, Question, QuestionSet, QuestionVersion, Unit
 from ..schemas import QuestionOut, QuestionPatch
 from ..services import compose_render, qimage, versions as version_svc
+from ..services.bundle_import import _question_hash
 
 router = APIRouter(prefix="/api/questions", tags=["questions"])
 
@@ -160,6 +162,59 @@ def type_stats(textbook_id: int, db: Session = Depends(get_db)):
     return {t: c for t, c in rows}
 
 
+class AiQuestionIn(BaseModel):
+    stem: str = Field(min_length=1)
+    answer: str = ""
+    analysis: str = ""
+    q_type: str = "综合"
+    difficulty: int = 3
+    knowledge_points: list[str] = Field(default_factory=list)
+    images: list[dict] = Field(default_factory=list)
+    score: int = 10
+    book_id: int | None = None
+
+
+@router.post("")
+def create_ai_question(body: AiQuestionIn, db: Session = Depends(get_db)):
+    """把 AI 依据文献出的题存进题库；按题干/答案去重。"""
+    topics = [str(x).strip() for x in (body.knowledge_points or []) if str(x).strip()]
+    if not topics:
+        from ..services.ai import CHEM_TOPICS, heuristic_classify
+        topics = (heuristic_classify(body.stem, topics=CHEM_TOPICS).get("topics") or [])[:2]
+    if topics:
+        try:
+            from .authoring import _ensure_topic_tags
+            _ensure_topic_tags(db, topics)
+        except Exception:  # noqa: BLE001
+            pass
+    book = db.get(Book, body.book_id) if body.book_id else None
+    if book is None:
+        book = db.scalars(select(Book).where(Book.title == "AI 文献出题")).first()
+    if book is None:
+        book = Book(role="paper_set", subject="化学", grade=12, semester="全",
+                    publisher="AI 文献出题", edition_year=2026, title="AI 文献出题")
+        db.add(book)
+        db.flush()
+    payload = {"stem": body.stem, "q_type": body.q_type, "options": [],
+               "answer": body.answer, "knowledge_points": topics}
+    h = _question_hash(book.id, payload)
+    old = db.scalars(select(Question).where(Question.book_id == book.id,
+                                            Question.content_hash == h)).first()
+    if old is not None:
+        return {"ok": True, "id": old.id, "deduped": True}
+    q = Question(
+        book_id=book.id, stem=body.stem, answer=body.answer, analysis=body.analysis,
+        q_type=body.q_type or "综合", difficulty=max(1, min(5, body.difficulty or 3)),
+        knowledge_points=topics, images=body.images or [],
+        tags=topics, status="draft", scope_status="extension",
+        source_title="AI 文献出题", content_hash=h,
+    )
+    db.add(q)
+    db.commit()
+    db.refresh(q)
+    return {"ok": True, "id": q.id, "deduped": False}
+
+
 @router.get("/{question_id}", response_model=QuestionOut)
 def get_question(question_id: int, db: Session = Depends(get_db)):
     q = db.get(Question, question_id)
@@ -290,3 +345,46 @@ def trim_blank(question_id: int, db: Session = Depends(get_db)):
     q.layout = layout
     db.commit()
     return {"id": q.id, "image": out["path"], "width": out["width"], "height": out["height"]}
+
+
+# ---------------------------------------------------------------- 讨论与提问
+class NoteIn(BaseModel):
+    body: str = Field(min_length=1, max_length=2000)
+    author: str = Field(default="我", max_length=32)
+
+
+def _note_out(n) -> dict:
+    return {"id": n.id, "question_id": n.question_id, "author": n.author,
+            "body": n.body, "created_at": n.created_at.isoformat() if n.created_at else None}
+
+
+@router.get("/{question_id}/notes")
+def list_notes(question_id: int, db: Session = Depends(get_db)):
+    from ..models import QuestionNote
+    rows = db.scalars(select(QuestionNote).where(QuestionNote.question_id == question_id)
+                      .order_by(QuestionNote.id)).all()
+    return {"notes": [_note_out(n) for n in rows], "count": len(rows)}
+
+
+@router.post("/{question_id}/notes")
+def add_note(question_id: int, body: NoteIn, db: Session = Depends(get_db)):
+    from ..models import QuestionNote
+    q = db.get(Question, question_id)
+    if q is None:
+        raise HTTPException(404, "题目不存在")
+    n = QuestionNote(question_id=question_id, author=body.author or "我", body=body.body.strip())
+    db.add(n)
+    db.commit()
+    db.refresh(n)
+    return _note_out(n)
+
+
+@router.delete("/notes/{note_id}")
+def del_note(note_id: int, db: Session = Depends(get_db)):
+    from ..models import QuestionNote
+    n = db.get(QuestionNote, note_id)
+    if n is None:
+        raise HTTPException(404, "留言不存在")
+    db.delete(n)
+    db.commit()
+    return {"ok": True}

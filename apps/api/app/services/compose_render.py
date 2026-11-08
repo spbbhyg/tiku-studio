@@ -108,14 +108,25 @@ def _hex_color(value, default=(0.06, 0.07, 0.09)):
         return default
 
 
+def _coord(block: dict, key: str, default: float) -> float:
+    """读取坐标；0 是合法坐标，不能用 ``or`` 回退成默认值。"""
+    v = block.get(key)
+    if v is None or v == "":
+        return default
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
 def _draw_styled_text(page: pymupdf.Page, block: dict) -> float:
     """逐字符绘制带 runs 的文字块（每个字可单独字号/颜色）。
 
     runs 形如 ``[{"t": "abc", "s": 14, "c": "#ff0000"}]``；没有 s/c 的段落继承块级设置。
     """
     size = max(6.0, min(48.0, float(block.get("size") or 12)))
-    x = max(0.0, min(PAGE_W - 24, float(block.get("x") or 48)))
-    y = float(block.get("y") or 48)
+    x = max(0.0, min(PAGE_W - 24, _coord(block, "x", 48)))
+    y = _coord(block, "y", 48)
     width = max(60.0, min(PAGE_W - 2 * x, float(block.get("w") or (PAGE_W - 2 * x))))
     line = float(block.get("line") or 1.55)
     bold = bool(block.get("bold"))
@@ -165,8 +176,8 @@ def _draw_text(page: pymupdf.Page, block: dict) -> float:
         return _draw_styled_text(page, block)
     size = float(block.get("size") or 12)
     size = max(6.0, min(48.0, size))
-    x = float(block.get("x") or 48)
-    y = float(block.get("y") or 48)
+    x = _coord(block, "x", 48)
+    y = _coord(block, "y", 48)
     x = max(0.0, min(PAGE_W - 24, x))
     width = float(block.get("w") or (PAGE_W - 2 * x))
     width = max(60.0, min(PAGE_W - 2 * x, width))
@@ -177,8 +188,15 @@ def _draw_text(page: pymupdf.Page, block: dict) -> float:
     font = pymupdf.Font(fontfile=str(FONT_B if bold else FONT))
 
     runs = rich_segments(block.get("text") or "")
-    for line in _wrap_runs(runs, font, size, width):
+    wrapped = _wrap_runs(runs, font, size, width)
+    for line_idx, line in enumerate(wrapped):
         total = sum(w for _, _, w in line)
+        # 两端对齐：除最后一行外，把剩余宽度均摊到字符间隙里，
+        # 这样画布上看到的 justify 与题库出图保持一致。
+        extra = 0.0
+        n_chars = sum(len(payload) for kind, payload, _ in line if kind == "text")
+        if align == "justify" and line_idx < len(wrapped) - 1 and n_chars > 1:
+            extra = max(0.0, (width - total) / (n_chars - 1))
         if align == "center":
             cx = x + max(0.0, (width - total) / 2)
         elif align == "right":
@@ -186,11 +204,22 @@ def _draw_text(page: pymupdf.Page, block: dict) -> float:
         else:
             cx = x
         base = y + size * 0.98
+        text_chars = [ch for kind, payload, _ in line if kind == "text" for ch in payload]
+        char_i = 0
         for kind, payload, w in line:
             if kind == "text":
                 if payload:
-                    page.insert_text((cx, base), payload, fontname=font_name,
-                                     fontsize=size, color=_hex_color(block.get("color")))
+                    if extra > 0:
+                        for ch in payload:
+                            cw = font.text_length(ch, fontsize=size)
+                            page.insert_text((cx, base), ch, fontname=font_name,
+                                             fontsize=size, color=_hex_color(block.get("color")))
+                            char_i += 1
+                            cx += cw + (extra if char_i < len(text_chars) else 0)
+                    else:
+                        page.insert_text((cx, base), payload, fontname=font_name,
+                                         fontsize=size, color=_hex_color(block.get("color")))
+                        cx += w
             else:
                 latex, iw, ih = payload
                 r = math_png(latex, size)
@@ -199,7 +228,7 @@ def _draw_text(page: pymupdf.Page, block: dict) -> float:
                     top = base - h_pt + size * 0.22
                     rect = pymupdf.Rect(cx, top, cx + h_pt * ratio, top + h_pt)
                     page.insert_image(rect, stream=png)
-            cx += w
+                cx += w
         y += line_h
     return y
 
@@ -255,12 +284,12 @@ def _block_bottom(block: dict) -> float:
                     h = w * 0.4
             else:
                 h = w * 0.4
-        return float(block.get("y") or 0) + h
+        return _coord(block, "y", 0) + h
     text = block.get("text") or ""
     size = float(block.get("size") or 12)
-    width = float(block.get("w") or (PAGE_W - 2 * float(block.get("x") or 48)))
+    width = float(block.get("w") or (PAGE_W - 2 * _coord(block, "x", 48)))
     approx = max(1, int(len(text) / max(1.0, width / (size * 0.98))) + 1)
-    return float(block.get("y") or 0) + approx * size * 1.55
+    return _coord(block, "y", 0) + approx * size * 1.55
 
 
 def render_layout(layout: dict, dpi: int = 200) -> dict:
@@ -297,8 +326,8 @@ def render_layout(layout: dict, dpi: int = 200) -> dict:
             p = image_path(block.get("path"))
             if not p:
                 continue
-            x = float(block.get("x") or 40)
-            y = float(block.get("y") or 40) + dy
+            x = _coord(block, "x", 40)
+            y = _coord(block, "y", 40) + dy
             w = float(block.get("w") or 400)
             h = float(block.get("h") or 0)
             if not h:
@@ -316,7 +345,7 @@ def render_layout(layout: dict, dpi: int = 200) -> dict:
             content_bottom = max(content_bottom, y + h)
         elif kind == "text":
             shifted = dict(block)
-            shifted["y"] = float(block.get("y") or 0) + dy
+            shifted["y"] = _coord(block, "y", 0) + dy
             content_bottom = max(content_bottom, _draw_text(page, shifted))
 
     trim = bool((layout or {}).get("trim"))

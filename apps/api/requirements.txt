@@ -4,6 +4,8 @@ sqlalchemy>=2.0
 pydantic>=2.7
 jsonschema>=4.21
 pymupdf>=1.24
+# 导出：paperdoc/v2 模板（paper.html / paper.css）
+jinja2>=3.1
 # 扫描件 OCR：出题页逐页精读与图片题生成答案
 rapidocr_onnxruntime>=1.2.3
 httpx>=0.27
@@ -14,5 +16,7 @@ python-docx>=1.1
 matplotlib>=3.8
 # 导出：题目卷/答案卷 PDF（借本机 Edge/Chrome 渲染；没有浏览器时退化为网页打印）
 playwright>=1.49
+# v2 编辑器结构式服务端渲染（可选，装不上时前端仍可用 Ketcher 客户端画）
+rdkit>=2024.9
 # 开发/测试：
 pytest>=8.2

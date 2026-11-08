@@ -1,0 +1,213 @@
+{
+  "schema": "paperdoc/v2",
+  "meta": {
+    "title": "第40 届Chemy 化学奥林匹克（初赛）模拟试题1",
+    "subject": "化学",
+    "grade": "高中",
+    "total_score": 20,
+    "header": "{title}",
+    "footer": "{page}/{pages}",
+    "source": {
+      "questions_pdf": "第40届化学奥林匹克Chemy模拟试题题目合集.pdf",
+      "questions_page": 4,
+      "answers_pdf": "第40届化学奥林匹克Chemy模拟试题参考答案合集.pdf",
+      "answers_pages": [3, 4],
+      "note": "样例只含「模拟试题 1」第 1 题，用来把契约钉死在真实版式上"
+    }
+  },
+  "front": [
+    {
+      "t": "para",
+      "text": "提示：1) 凡题目中要求书写反应方程式，须配平且系数为最简整数比。",
+      "indent": false
+    },
+    {
+      "t": "para",
+      "text": "2) 只有题 2-3-1、题 2-3-2 和题 2-3-4 的计算结果要求修约有效数字。",
+      "indent": true
+    },
+    {
+      "t": "para",
+      "text": "3) 计算过程，列出公式后，先代入数值，然后给出答案；代入数值时，可以不写单位，最后在答案后给出单位，常数，如 R、N<sub>A</sub>、π 等可以用符号代替。",
+      "indent": true
+    },
+    {
+      "t": "para",
+      "text": "4) 除题 5-1-1 和题 5-3 外，每个解释题的问题不得超过 30 字。",
+      "indent": true
+    },
+    {
+      "t": "para",
+      "text": "5) 可能需要的常数：法拉第常数 F = 9.6485×10<sup>4</sup> C mol<sup>-1</sup>；玻尔兹曼常数 k<sub>B</sub> = R/N<sub>A</sub>；气体常数 R = 8.3145 J K<sup>-1</sup> mol<sup>-1</sup>；阿伏加德罗常数 N<sub>A</sub> = 6.0221×10<sup>23</sup> mol<sup>-1</sup>；",
+      "indent": true
+    },
+    {
+      "t": "para",
+      "text": "6) 缩写：Sn(EH)<sub>2</sub>：辛酸亚锡；Me：甲基；Ph：苯基；mCPBA：间氯过氧苯甲酸；Ts：对甲苯磺酰基；Et：乙基；toluene：甲苯；TMS：三甲基硅基；TBDPS：二苯基叔丁基硅基；Silica gel：硅胶；rt：室温；Ac：乙酰基；Cbz：苄氧羰基；Bn：苄基。",
+      "indent": true
+    }
+  ],
+  "items": [
+    {
+      "number": 1,
+      "title": "确定未知元素",
+      "score": 20,
+      "percent": 8,
+      "blocks": [
+        {
+          "t": "para",
+          "text": "元素 M 是人类最早发现的金属之一，早在几千年前埃及就把 M 的开采与冶炼操作描绘在雕塑上。在公元六世纪，埃及人将金属与占星学相联系，M 元素被对照于太阳。M 是货币金属之一，具有较强的化学惰性，不溶于一般的酸，但能溶于王水生成阴离子 A<sup>-</sup>。在有氧存在的条件下也能溶于某种剧毒的钠盐溶液(反应 1)，该方法用于提取天然的 M。考虑该方法的毒性和污染性，人们着手于实验其他溶解金属 M 的条件。在 FeCl<sub>3</sub> 存在的条件下，M 可与硫脲反应并进入溶液(反应 2)，此方法有更高的经济指标，但尚处于试验阶段。盐 NaA 的溶液中加入硫代硫酸钠，此后加入乙醇醇析，可以得到一种 M 的配合物(反应 3)，且溶液的 pH 未发生明显变化。",
+          "style": "body",
+          "indent": true
+        },
+        {
+          "t": "sub",
+          "no": "1-1",
+          "text": "写出 M 的元素名称以及反应 1-反应 3 的化学方程式。"
+        },
+        {
+          "t": "sub",
+          "no": "1-2",
+          "text": "使用有机配体和氧化剂可以使 M 的单质溶解在有机溶剂中，在丙酮中加入 Et<sub>4</sub>TDS(结构如下图所示)和 I<sub>2</sub> 可以溶解 M，但反应的产物和加入反应物的当量相关。"
+        },
+        {
+          "t": "table",
+          "head": [
+            "M 的当量",
+            "Et<sub>4</sub>TDS 的当量",
+            "I<sub>2</sub> 的当量",
+            "产物"
+          ],
+          "rows": [
+            ["1", "0.5", "0.5", "P"],
+            ["1", "0.5", "1", "X"],
+            ["1", "1", "0.5", "Y"],
+            ["1", "1", "1.5", "Z"]
+          ]
+        },
+        {
+          "t": "para",
+          "text": "分别写出能体现 P、X、Y、Z 结构特征的化学式，以及其中 M 的化合价、配位数。",
+          "indent": true
+        },
+        {
+          "t": "sub",
+          "no": "1-3",
+          "text": "小博同学一日给小宇和小波表演了“神奇的腐蚀水”魔术：在 10 mL 乙醇中加入大量的 2-MBI、过氧化氢和少量的碘，即可得到“神奇的腐蚀水”。向“神奇的腐蚀水”中加入粉末 M，发现 M 全部溶解。若不加入碘，则发现在相同条件下只有 48% 的 M 溶解。M 在反应中以一种 +1 价阳离子的形式存在，画出该阳离子的结构，并分别指出 2-MBI、过氧化氢和碘在反应中的作用。"
+        },
+        {
+          "t": "figure",
+          "path": "samples/paperdoc-sim01/fig-structures.png",
+          "w": 248.8,
+          "h": 73.8,
+          "align": "center",
+          "caption": "",
+          "source": {
+            "file": "第40届化学奥林匹克Chemy模拟试题题目合集.pdf",
+            "page": 4,
+            "y0": 653.9,
+            "y1": 727.7
+          }
+        }
+      ],
+      "answer": {
+        "blocks": [
+          {
+            "t": "ansblock",
+            "for": "1-1",
+            "label": "共 7 分",
+            "blocks": [
+              {
+                "t": "para",
+                "style": "answer",
+                "indent": false,
+                "text": "M 的元素名称：金<score>（1 分）</score>"
+              },
+              {
+                "t": "para",
+                "style": "answer",
+                "indent": false,
+                "text": "反应 1：8NaCN + 4Au + O<sub>2</sub> + 2H<sub>2</sub>O = 4Na[Au(CN)<sub>2</sub>] + 4NaOH<score>（2 分）</score>"
+              },
+              {
+                "t": "para",
+                "style": "answer",
+                "indent": false,
+                "text": "反应 2：Au + FeCl<sub>3</sub> + 2CS(NH<sub>2</sub>)<sub>2</sub> = FeCl<sub>2</sub> + [Au(SC(NH<sub>2</sub>)<sub>2</sub>)<sub>2</sub>]Cl<score>（2 分）</score>"
+              },
+              {
+                "t": "para",
+                "style": "answer",
+                "indent": false,
+                "text": "反应 3：NaAuCl<sub>4</sub> + 4Na<sub>2</sub>S<sub>2</sub>O<sub>3</sub> = Na<sub>2</sub>S<sub>4</sub>O<sub>6</sub> + Na<sub>3</sub>[Au(S<sub>2</sub>O<sub>3</sub>)<sub>2</sub>] + 4NaCl<score>（2 分）</score>"
+              }
+            ]
+          },
+          {
+            "t": "ansblock",
+            "for": "1-2",
+            "label": "共 8 分，每个化合物化学式正确得 1 分，化合价和配位数均正确得 1 分",
+            "blocks": [
+              {
+                "t": "table",
+                "head": ["化合物", "化学式", "M 的化合价", "配位数"],
+                "style": ["body", "score", "score", "score"],
+                "rows": [
+                  ["P", "[Au(S<sub>2</sub>CNEt<sub>2</sub>)<sub>2</sub>][AuI<sub>2</sub>]", "+1、+3", "4、2"],
+                  ["X", "Au(S<sub>2</sub>CNEt<sub>2</sub>)I<sub>2</sub>", "+3", "4"],
+                  ["Y", "[Au(S<sub>2</sub>CNEt<sub>2</sub>)<sub>2</sub>]I", "+3", "4"],
+                  ["Z", "[Au(S<sub>2</sub>CNEt<sub>2</sub>)<sub>2</sub>]I<sub>3</sub>", "+3", "4"]
+                ]
+              }
+            ]
+          },
+          {
+            "t": "ansblock",
+            "for": "1-3",
+            "label": "共 5 分",
+            "blocks": [
+              {
+                "t": "para",
+                "style": "answer",
+                "indent": false,
+                "text": "阳离子的结构<score>（2 分）</score>："
+              },
+              {
+                "t": "figure",
+                "path": "samples/paperdoc-sim01/fig-cation.png",
+                "w": 180.8,
+                "h": 87.0,
+                "align": "center",
+                "caption": "",
+                "source": {
+                  "file": "第40届化学奥林匹克Chemy模拟试题参考答案合集.pdf",
+                  "page": 4,
+                  "y0": 110.7,
+                  "y1": 197.7
+                }
+              },
+              {
+                "t": "para",
+                "style": "answer",
+                "indent": false,
+                "text": "2-巯基苯并咪唑：作为配体<score>（1 分）</score>稳定 Au(I)。"
+              },
+              {
+                "t": "para",
+                "style": "answer",
+                "indent": false,
+                "text": "过氧化氢：氧化剂<score>（1 分）</score>。"
+              },
+              {
+                "t": "para",
+                "style": "answer",
+                "indent": false,
+                "text": "碘：催化剂<score>（1 分）</score>，先与 Au 反应生成 AuI<sub>2</sub><sup>-</sup>，再被过氧化氢氧化得到 I<sub>2</sub>。"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

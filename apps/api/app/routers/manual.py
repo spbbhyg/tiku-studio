@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from ..config import LIBRARY_DIR
 from ..db import get_db
+from ..services.imgclean import strip_doc, strip_watermarks
 
 router = APIRouter(prefix="/api/manual", tags=["pages"])
 
@@ -197,13 +198,15 @@ def page_image(doc_id: str, page_no: int, zoom: float = 2.0):
     path = _doc_file(doc_id)
 
     rel_dir = Path("page-cache") / doc_id
-    cache = LIBRARY_DIR / rel_dir / f"p{page_no}-z{zoom:g}.png"
+    # 缓存名带 -wm：去水印版与旧缓存分开，改逻辑后不会读到老图
+    cache = LIBRARY_DIR / rel_dir / f"p{page_no}-z{zoom:g}-wm.png"
     if not cache.exists():
         cache.parent.mkdir(parents=True, exist_ok=True)
         with fitz.open(str(path)) as doc:
             if page_no > len(doc):
                 raise HTTPException(404, "页码超出文档范围")
             page = doc.load_page(page_no - 1)
+            strip_watermarks(page, doc)
             pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
             pix.save(str(cache))
     return FileResponse(str(cache), media_type="image/png",
@@ -369,8 +372,12 @@ class CropIn(BaseModel):
     page_no: int = Field(ge=1)
     # 归一化坐标（0~1，相对整页宽高），左上→右下
     rect: list[float] = Field(min_length=4, max_length=4)
-    zoom: float = Field(default=3.0, ge=1.0, le=6.0)
+    zoom: float = Field(default=3.0, ge=1.0, le=8.0)
+    # 印刷用图要 300dpi 以上：给了 dpi 就按 dpi 换算缩放（72dpi 为基准）
+    dpi: float | None = Field(default=None, ge=72, le=600)
     caption: str | None = None
+    # 自动去掉整页底纹/水印图层（默认开；某张图被误删就传 false 重裁）
+    clean: bool = True
 
 
 @router.post("/crop")
@@ -387,14 +394,19 @@ def crop_page(body: CropIn):
         if body.page_no > len(doc):
             raise HTTPException(404, "页码超出文档范围")
         page = doc.load_page(body.page_no - 1)
+        if body.clean:
+            strip_watermarks(page, doc)
         r = page.rect
         clip = fitz.Rect(r.x0 + x0 * r.width, r.y0 + y0 * r.height,
                          r.x0 + x1 * r.width, r.y0 + y1 * r.height)
-        pix = page.get_pixmap(clip=clip, matrix=fitz.Matrix(body.zoom, body.zoom))
+        zoom = (body.dpi / 72.0) if body.dpi else body.zoom
+        zoom = min(max(float(zoom), 1.0), 8.0)
+        pix = page.get_pixmap(clip=clip, matrix=fitz.Matrix(zoom, zoom))
 
     saved = _save_png(pix.tobytes("png"))
     out = {"path": saved["path"], "width": pix.width, "height": pix.height,
-           "doc_id": body.doc_id, "page_no": body.page_no}
+           "doc_id": body.doc_id, "page_no": body.page_no,
+           "dpi": round(zoom * 72.0, 1), "rect": [x0, y0, x1, y1]}
     if body.caption:
         out["caption"] = body.caption
     return out
@@ -416,6 +428,66 @@ def upload_image(body: ImageIn):
         raise HTTPException(400, f"base64 解码失败：{e}")
     saved = _save_png(raw)
     return {"path": saved["path"], "bytes": saved["bytes"]}
+
+
+class ImageRegionIn(BaseModel):
+    path: str
+    rect: list[float] = Field(min_length=4, max_length=4)
+    ocr: bool = True
+    erase_source: bool = False   # 裁出后是否在原图上把该区域涂白
+
+
+@router.post("/image-region")
+def image_region(body: ImageRegionIn):
+    """按归一化矩形裁剪一张题图，并（可选）用本机 OCR 取字。
+
+    供出题页「固定图片 → 右键拖选图内区域」使用：只截取选中的那一小块，
+    不改变原图；返回新图路径和识别文字，前端可复制或插入画布。
+    """
+    src = (LIBRARY_DIR / body.path).resolve()
+    if not str(src).startswith(str(LIBRARY_DIR.resolve())) or not src.is_file():
+        raise HTTPException(404, "图片不存在")
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+    except Exception:
+        raise HTTPException(501, "缺少 Pillow，无法处理图片")
+    im = Image.open(src).convert("RGB")
+    W, H = im.size
+    x0, y0, x1, y1 = [float(v) for v in body.rect]
+    x0, x1 = sorted((max(0.0, min(1.0, x0)), max(0.0, min(1.0, x1))))
+    y0, y1 = sorted((max(0.0, min(1.0, y0)), max(0.0, min(1.0, y1))))
+    box = (int(x0 * W), int(y0 * H), max(int(x0 * W) + 1, int(x1 * W)), max(int(y0 * H) + 1, int(y1 * H)))
+    if box[2] - box[0] < 4 or box[3] - box[1] < 4:
+        raise HTTPException(400, "框选区域太小")
+    crop = im.crop(box)
+    buf = BytesIO()
+    crop.save(buf, format="PNG")
+    saved = _save_png(buf.getvalue())
+    erased_path = ""
+    if body.erase_source:
+        im.paste((255, 255, 255), box)
+        buf2 = BytesIO()
+        im.save(buf2, format="PNG")
+        erased_path = _save_png(buf2.getvalue())["path"]
+    text, lines = "", []
+    if body.ocr:
+        try:
+            from ..services.ai import _ocr_image_file
+
+            lines = _ocr_image_file(saved["path"])
+            text = "\n".join((ln.get("text") or "").strip() for ln in lines if (ln.get("text") or "").strip())
+        except Exception:
+            text, lines = "", []
+    return {
+        "path": saved["path"],
+        "erased_path": erased_path,
+        "text": text,
+        "lines": lines[:80],
+        "width": box[2] - box[0],
+        "height": box[3] - box[1],
+    }
 
 
 @router.post("/trim")
@@ -466,7 +538,14 @@ def trim_image(body: dict):
 
     im = Image.open(src).convert("RGB")
     bg = Image.new("RGB", im.size, (255, 255, 255))
-    box = ImageChops.difference(im, bg).getbbox()
+    diff = ImageChops.difference(im, bg).convert("L")
+    # 淡淡的底纹 / 水印 / 扫描噪点不该算内容，否则整张图都是「边」、永远去不掉白边
+    try:
+        thr = int(float(body.get("threshold") or 18))
+    except Exception:
+        thr = 18
+    mask = diff.point(lambda v: 255 if v > thr else 0)
+    box = mask.getbbox()
     if not box:
         raise HTTPException(400, "整张图都是空白")
 

@@ -34,6 +34,7 @@ def _snapshot(q: Question, book: Book, unit_name: str | None) -> dict:
         "difficulty": q.difficulty,
         "knowledge_points": q.knowledge_points or [],
         "images": q.images or [],
+        "layout": q.layout or None,
         "source_page": q.source_page,
         "source_book_title": book.title,
         "unit_name": unit_name,

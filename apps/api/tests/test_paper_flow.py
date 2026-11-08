@@ -470,3 +470,20 @@ def test_import_multiple_pdfs(monkeypatch):
             if book:
                 db.delete(book)
             db.commit()
+
+
+def test_split_groups_subquestions_by_main_number():
+    from app.routers.workbench import _merge_by_main, _qnum_of
+
+    assert _qnum_of("1-1 已知") == 1
+    assert _qnum_of("第2题") == 2
+    assert _qnum_of("3. 合成") == 3
+    merged = _merge_by_main([
+        {"stem": "第1题 元素推断\n1-1 求 M", "answer": ""},
+        {"stem": "第2题 续\n1-3 写方程式", "answer": "A"},
+        {"stem": "第3题 有机\n2-1 画结构", "answer": "B"},
+    ])
+    assert len(merged) == 2
+    assert "1-1" in merged[0]["stem"] and "1-3" in merged[0]["stem"]
+    assert "第1题" in merged[0]["stem"] and "第2题" not in merged[0]["stem"]
+    assert merged[1]["stem"].startswith("第3题")

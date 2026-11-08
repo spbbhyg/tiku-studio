@@ -1,20 +1,53 @@
 from urllib.parse import quote
 
+import logging
 import re
+import threading
+import time
+import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..db import get_db
+from ..db import SessionLocal, get_db
 from ..models import Paper, PaperQuestion
 from ..schemas import AiPaperBuildIn, AiPaperIn, MergePapersIn, PaperBrief, PaperGenerate, PaperOut
 from ..services import ai
+from ..services import exam_render
 from ..services import paper_builder
+from ..services import paper_doc
 from ..services import pdf_render
+from . import exam
 
 router = APIRouter(prefix="/api/papers", tags=["papers"])
+log = logging.getLogger(__name__)
+
+
+def _export_v2(paper, part: str, title: str, header: str, footer: str):
+    """paperdoc/v2 导出；任何一步不过就返回 (None, warnings, "v1") 让调用方回退旧渲染。"""
+    from ..services.paperdoc import adapter
+    from ..services.paperdoc import render as v2_render
+
+    warnings: list[str] = []
+    try:
+        doc, warns, errors = adapter.build_and_check(
+            paper, title=title, header=header, footer=footer)
+    except Exception as exc:                              # noqa: BLE001
+        log.warning("paperdoc 适配失败，回退旧渲染：%s", exc)
+        return None, [f"适配崩溃：{exc}"], "v1"
+    warnings.extend(warns)
+    if errors:
+        log.warning("paperdoc 校验不过，回退旧渲染：%s", errors[:5])
+        warnings.append("校验：" + "；".join(errors[:5]))
+        return None, warnings, "v1"
+    try:
+        return v2_render.export_pdf(doc, part), warnings, "v2"
+    except Exception as exc:                              # noqa: BLE001
+        log.warning("paperdoc 渲染失败，回退旧渲染：%s", exc)
+        warnings.append(f"渲染失败：{exc}")
+        return None, warnings, "v1"
 
 
 def _snapshot_item(q: dict, score: float | None = None) -> dict:
@@ -27,6 +60,7 @@ def _snapshot_item(q: dict, score: float | None = None) -> dict:
         "difficulty": q.get("difficulty") or 3,
         "knowledge_points": q.get("knowledge_points") or [],
         "images": [],
+        "layout": q.get("layout") or None,
         "source_book_title": q.get("source_book_title") or "AI 生成",
         "unit_name": "",
         "_score": score,
@@ -133,6 +167,72 @@ def preview_ai(body: AiPaperIn, db: Session = Depends(get_db)) -> dict:
             "usage": gen.get("usage")}
 
 
+_AI_JOBS: dict[str, dict] = {}
+_AI_JOBS_LOCK = threading.Lock()
+
+
+def _job_cleanup() -> None:
+    now = time.time()
+    with _AI_JOBS_LOCK:
+        for jid, job in list(_AI_JOBS.items()):
+            if now - job.get("created", now) > 3600:
+                _AI_JOBS.pop(jid, None)
+
+
+@router.post("/ai/jobs")
+def start_ai_job(body: AiPaperIn) -> dict:
+    """后台生成 AI 题卷：切走页面也不会中断，回来可继续取结果。"""
+    _job_cleanup()
+    source = (body.source or "").strip()
+    doc_id = body.doc_id
+    if not source and not doc_id:
+        raise HTTPException(400, "请提供命题素材（题干文字或选择一份 PDF）")
+    jid = uuid.uuid4().hex[:16]
+    with _AI_JOBS_LOCK:
+        _AI_JOBS[jid] = {"status": "running", "created": time.time(), "items": [],
+                         "title": (body.title or "").strip(), "error": "", "model": ""}
+
+    def run() -> None:
+        db = SessionLocal()
+        try:
+            src = source
+            if not src and doc_id:
+                src = ai.pdf_to_text(ai._doc_file(doc_id))
+            gen = ai.generate_questions(db, src, body.count, body.q_type, body.difficulty)
+            items = []
+            for q in gen["questions"]:
+                score = float(q.get("score") or 10)
+                items.append({"snapshot": _snapshot_item(q, score), "score": score})
+            title = (body.title or "").strip() or f"AI 命题 · {len(items)} 题"
+            with _AI_JOBS_LOCK:
+                job = _AI_JOBS.get(jid)
+                if job is not None:
+                    job.update({"status": "done", "items": items, "title": title,
+                                "model": gen.get("model") or ""})
+        except Exception as exc:  # noqa: BLE001
+            detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            with _AI_JOBS_LOCK:
+                job = _AI_JOBS.get(jid)
+                if job is not None:
+                    job.update({"status": "error", "error": detail or "AI 命题失败"})
+        finally:
+            db.close()
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"ok": True, "job_id": jid}
+
+
+@router.get("/ai/jobs/{job_id}")
+def get_ai_job(job_id: str) -> dict:
+    with _AI_JOBS_LOCK:
+        job = dict(_AI_JOBS.get(job_id) or {})
+    if not job:
+        raise HTTPException(404, "任务不存在或已过期")
+    return {"job_id": job_id, "status": job["status"], "title": job.get("title") or "",
+            "items": job.get("items") or [], "error": job.get("error") or "",
+            "model": job.get("model") or ""}
+
+
 @router.post("/ai/build", response_model=PaperOut)
 def build_ai(body: AiPaperBuildIn, db: Session = Depends(get_db)):
     """分步出题最后一步：把逐题（可人工改过）的快照建成一套试卷。"""
@@ -185,15 +285,22 @@ def merge(body: MergePapersIn, db: Session = Depends(get_db)):
 
 
 @router.get("", response_model=list[PaperBrief])
-def list_papers(db: Session = Depends(get_db)):
+def list_papers(include_drafts: int = 0, db: Session = Depends(get_db)):
     papers = db.scalars(select(Paper).order_by(Paper.id.desc())).all()
     out = []
     for p in papers:
         n = db.scalar(select(func.count()).select_from(PaperQuestion).where(PaperQuestion.paper_id == p.id))
+        cfg = p.config or {}
+        kind = str(cfg.get("kind") or "")
+        status = exam.paper_status(p) if kind == "manual" else ""
+        # 人工卷没编辑完 = 草稿，留在「出整卷」里，不进试卷列表
+        if kind == "manual" and status == "draft" and not include_drafts:
+            continue
         out.append(PaperBrief(
             id=p.id, title=p.title, subject=p.subject, grade=p.grade, semester=p.semester,
             total_score=p.total_score, duration_minutes=p.duration_minutes,
-            question_count=n, created_at=p.created_at))
+            question_count=n, created_at=p.created_at,
+            kind=kind, source=str(cfg.get("source") or ""), status=status))
     return out
 
 
@@ -281,18 +388,109 @@ def view_paper(paper_id: int, part: str = "all", db: Session = Depends(get_db)):
         raise HTTPException(404, "试卷不存在")
     if part not in ("all", "questions", "answers"):
         part = "all"
+    if (paper.config or {}).get("kind") == "manual":
+        doc = exam.doc_from_paper(paper)
+        return HTMLResponse(exam_render.build_doc_html(doc, "questions" if part == "all" else part))
     return HTMLResponse(pdf_render.render_paper_html(db, paper, part))
 
 
+@router.get("/{paper_id}/export.pdf")
+def export_paper_pdf(paper_id: int, part: str = "questions", title: str = "",
+                     header: str = "", footer: str = "", save: int = 0,
+                     render: str = "", request: Request = None,
+                     db: Session = Depends(get_db)):
+    """统一导出：任何来源的卷子（人工 / 题库选题 / 画布 / 单题模式）都走这一条。
+
+    title / header / footer 是导出时临时覆盖的标题与页眉页脚；save=1 时顺手记进
+    paper.config.exam.export，下次打开还是上次填的。
+
+    默认走新的 paperdoc/v2 渲染器；校验或渲染不过自动回退旧渲染，并在
+    X-Paperdoc-Mode 里写清用的是哪套。render=v1 可强制回旧渲染（并存期回滚用）。
+    """
+    paper = db.get(Paper, paper_id)
+    if paper is None:
+        raise HTTPException(404, "试卷不存在")
+    if part not in ("questions", "answers"):
+        part = "questions"
+
+    if save:
+        cfg = dict(paper.config or {})
+        exam_cfg = dict(cfg.get("exam") or {})
+        exam_cfg["export"] = {"title": (title or "").strip(),
+                              "header": (header or "").strip(),
+                              "footer": (footer or "").strip()}
+        cfg["exam"] = exam_cfg
+        paper.config = cfg
+        db.commit()
+
+    base = str(request.base_url).rstrip("/") if request is not None else None
+    pdf = None
+    warnings: list[str] = []
+    mode = "v1"
+    choice = str(render or "").strip().lower()
+    if choice not in ("v1", "legacy", "old"):
+        pdf, warnings, mode = _export_v2(paper, part, title, header, footer)
+    if pdf is None:
+        doc = paper_doc.build_doc(paper, title=title, header=header, footer=footer)
+        try:
+            pdf = exam_render.export_pdf(doc, part, base)
+        except RuntimeError as e:
+            raise HTTPException(501, str(e))
+
+    # 人工整卷导出过就算「出完了」，和出整卷页面的行为保持一致
+    if (paper.config or {}).get("kind") == "manual":
+        try:
+            exam._set_status(db, paper, "done")
+        except Exception:                                  # noqa: BLE001
+            pass
+
+    label = "题目卷" if part == "questions" else "答案卷"
+    ttl = (title or "").strip() or str(paper.title or "") or "试卷"
+    filename = f"{ttl}_{label}.pdf"
+    headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+               "X-Paperdoc-Mode": mode}
+    if warnings:
+        headers["X-Paperdoc-Warnings"] = quote("；".join(warnings)[:600])
+    return Response(pdf, media_type="application/pdf", headers=headers)
+
+
+@router.post("/{paper_id}/export.pdf")
+def export_paper_pdf_post(paper_id: int, payload: dict = Body(default={}),
+                          request: Request = None, db: Session = Depends(get_db)):
+    """POST 版导出：标题/页眉页脚放 JSON body。
+
+    走查询串传中文在这台机器上会被解码成乱码（PDF 里标题变方块），
+    统一改成 JSON body，前端只用这一条。
+    """
+    p = payload or {}
+    return export_paper_pdf(
+        paper_id,
+        part=str(p.get("part") or "questions"),
+        title=str(p.get("title") or ""),
+        header=str(p.get("header") or ""),
+        footer=str(p.get("footer") or ""),
+        save=int(p.get("save") or 0),
+        render=str(p.get("render") or ""),
+        request=request,
+        db=db,
+    )
+
+
 @router.get("/{paper_id}/export")
-def export_paper(paper_id: int, part: str = "all", db: Session = Depends(get_db)):
+def export_paper(paper_id: int, part: str = "all", request: Request = None,
+                 db: Session = Depends(get_db)):
     paper = db.get(Paper, paper_id)
     if paper is None:
         raise HTTPException(404, "试卷不存在")
     if part not in ("all", "questions", "answers"):
         part = "all"
     try:
-        pdf = pdf_render.export_pdf(db, paper, part)
+        if (paper.config or {}).get("kind") == "manual":
+            doc = exam.doc_from_paper(paper)
+            base = str(request.base_url).rstrip("/") if request is not None else None
+            pdf = exam_render.export_pdf(doc, part, base)
+        else:
+            pdf = pdf_render.export_pdf(db, paper, part)
     except RuntimeError as e:
         raise HTTPException(501, str(e))
     suffix = {"questions": "_题目卷", "answers": "_答案卷"}.get(part, "")

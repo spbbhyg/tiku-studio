@@ -1,0 +1,243 @@
+/* =============================================================================
+   paper.css —— paperdoc/v2 唯一的排版样式表
+   -----------------------------------------------------------------------------
+   规矩（《重改导出-提示词》§2 / §3）：
+   1. 所有尺寸都是变量，模板参数只改变量，不改结构；
+   2. 不写 !important，不用行内 style 覆盖行距字号；
+   3. 分页交给 Paged.js，这里只声明「哪些东西不许被劈开」；
+   4. @page 规则不在这里 —— 它要带每张卷自己的页眉和页脚格式，
+      由 app/services/paperdoc/render.py 用同一套常量生成后内联进 <style>。
+   ============================================================================= */
+
+:root {
+  /* 字体 */
+  --font-body: "SimSun", "宋体", "Songti SC", "Noto Serif CJK SC", serif;
+
+  /* 版面 */
+  --content-width: 415.6pt;   /* 版心宽 = 505.6 - 90.0 */
+  --first-indent: 21pt;       /* 段首缩进 2 字符 */
+  --item-gap: 18pt;           /* 大题之间 */
+  --figure-gap: 6pt;          /* 图上下 */
+  --rule-width: 0.5pt;        /* 表格框线 */
+
+  /* 字号 / 行距 */
+  --body-size: 10.56pt;
+  --body-line: 15.6pt;        /* 10.56 × 1.477 */
+  --table-size: 9.96pt;
+  --table-line: 1.45;
+  --note-size: 6.96pt;        /* 图注、脚注 */
+  --note-line: 1.4;
+
+  /* 颜色 */
+  --color-body: #000000;
+  --color-answer: #0000FF;    /* 答案正文蓝 */
+  --color-score: #FF0000;     /* 分值标注红 */
+  --color-note: #000000;
+}
+
+/* ---------------------------------------------------------------- 基本版式 */
+
+html, body { margin: 0; padding: 0; }
+
+body {
+  font-family: var(--font-body);
+  font-size: var(--body-size);
+  line-height: var(--body-line);
+  color: var(--color-body);
+  text-align: justify;
+  text-justify: inter-ideograph;
+  /* 末行不许被拉开：单行段落（答案、标题）也必须保持原样 */
+  text-align-last: left;
+  /* 中文断行：不把标点留在行首行尾 */
+  line-break: normal;
+  overflow-wrap: break-word;
+}
+
+p { margin: 0; }
+
+/* 上下标不许撑高行盒：样张里带 <sub>/<sup> 的行，行距仍是 15.6 */
+sub, sup {
+  font-size: 0.66em;
+  line-height: 0;
+  /* 用相对定位而不动基线，行盒高度恒等于 line-height */
+  vertical-align: baseline;
+  position: relative;
+}
+
+sup { top: -0.36em; }
+sub { top: 0.22em; }
+
+/* ---------------------------------------------------------------- 块 */
+
+.para {
+  text-indent: var(--first-indent);
+}
+
+.para.no-indent { text-indent: 0; }
+
+.para--answer { color: var(--color-answer); }
+.para--score  { color: var(--color-score); }
+.para--note   { font-size: var(--note-size); line-height: var(--note-line); }
+
+/* 答案里的红字分值标注 */
+.score { color: var(--color-score); }
+
+.heading {
+  margin: 0 0 var(--figure-gap) 0;
+  font-size: var(--body-size);
+  line-height: var(--body-line);
+  font-weight: 700;
+  text-indent: 0;
+  text-align: center;
+}
+
+.pagebreak { break-after: page; }
+
+/* ---------------------------------------------------------------- 小题编号行
+   编号由渲染器生成，顶格；换行后也顶格（样张里 1-3 的长题干是这样排的）。 */
+
+.sub {
+  text-indent: 0;
+  text-align: justify;
+  /* 小问编号行不许被劈到两页（§3） */
+  break-inside: avoid;
+}
+
+.sub-no { margin-right: 0; }
+
+/* ---------------------------------------------------------------- 图 */
+
+.figure {
+  display: block;
+  margin: var(--figure-gap) auto;
+  break-inside: avoid;
+}
+
+.figure--left   { margin-left: 0; margin-right: auto; }
+.figure--right  { margin-left: auto; margin-right: 0; }
+.figure--center { margin-left: auto; margin-right: auto; }
+
+.figure img {
+  display: block;
+  /* 宽度写在行内（figure.w），这里只保证不溢出 */
+  max-width: var(--content-width);
+  height: auto;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.figure--left img  { margin-left: 0; margin-right: auto; }
+.figure--right img { margin-left: auto; margin-right: 0; }
+
+.figure-caption {
+  margin: 2pt 0 0 0;
+  font-size: var(--note-size);
+  line-height: var(--note-line);
+  text-align: center;
+  text-indent: 0;
+}
+
+.figure-missing {
+  border: 1px dashed #999;
+  color: #999;
+  font-size: var(--note-size);
+  padding: 6pt;
+  text-align: center;
+}
+
+/* ---------------------------------------------------------------- 表 */
+
+.table {
+  /* 样张里表格紧贴上下文，上下不留空（实测 558.4 → 560.83） */
+  margin: 0 auto;
+  border-collapse: collapse;
+  border-spacing: 0;
+  font-size: var(--table-size);
+  line-height: var(--table-line);
+  text-align: center;
+  break-inside: avoid;
+}
+
+.table th,
+.table td {
+  border: var(--rule-width) solid var(--color-body);
+  /* 行高 16.14pt = 9.96×1.45 + 0.85×2，和样张表格 5 行 80.7pt 对得上 */
+  padding: 0.85pt 5pt;
+  vertical-align: middle;
+  font-weight: 400;
+  text-align: center;
+}
+
+.table th { font-weight: 700; }
+
+/* 单元格按列着色：表头永远是黑字加粗 */
+.table .cell--answer { color: var(--color-answer); }
+.table .cell--score  { color: var(--color-score); }
+.table .cell--note   { color: var(--color-note); font-size: var(--note-size); }
+
+.table-caption {
+  margin: 2pt 0 0 0;
+  font-size: var(--note-size);
+  line-height: var(--note-line);
+  text-align: center;
+  text-indent: 0;
+}
+
+/* ---------------------------------------------------------------- 大题 */
+
+.item {
+  margin-top: var(--item-gap);
+  /* 优先整题不跨页；超过 0.75 页的大题由渲染器加 item--tall 放开 */
+  break-inside: avoid;
+}
+
+.item--tall { break-inside: auto; }
+
+.item:first-child { margin-top: 0; }
+
+.item-title {
+  margin: 0 0 0 0;
+  font-size: var(--body-size);
+  line-height: var(--body-line);
+  font-weight: 700;
+  text-indent: 0;
+  text-align: left;
+}
+
+.item-no { margin-right: 0; }
+
+.item-name { font-weight: 700; }
+
+.item-score { font-weight: 400; }
+
+/* ---------------------------------------------------------------- 试卷级前言
+   样张「提示：」实测：首段「提示：1) …」顶格，2)~6) 每条又缩进 3 字（31.68pt），
+   条目内换行回到版心左边 —— 是「首行缩进 3 字」，不是悬挂缩进。 */
+
+.front p {
+  text-indent: 31.5pt;
+}
+
+.front p:first-child,
+.front p.no-indent {
+  text-indent: 0;
+}
+
+/* ---------------------------------------------------------------- 答案块 */
+
+.ansblock { break-inside: avoid; }
+
+.ansblock-label {
+  margin: 2pt 0 0 0;
+  text-indent: 0;
+  color: var(--color-score);
+}
+
+.ansblock .para { text-indent: 0; }
+
+/* ---------------------------------------------------------------- 打印 */
+
+@media print {
+  body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  a { text-decoration: none; color: inherit; }
+}

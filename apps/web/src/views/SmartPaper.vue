@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { renderMath } from '../math.js'
 import { api } from '../api.js'
 
@@ -9,7 +9,7 @@ const TOPICS = ['原子结构', '分子结构与化学键', '晶体结构', '配
   '定量分析与滴定', '量子化学初步', '高分子化学', '分析化学']
 const TYPES = ['选择题', '填空题', '计算题', '综合推断题', '简答题', '机理题']
 
-const tab = ref('ai')
+const tab = ref('lit')
 const docs = ref([])
 const docId = ref('')
 const outlineDoc = ref(null)
@@ -30,6 +30,12 @@ const focus = ref('')
 const briefCount = ref(2)
 const brief = ref(null)
 const briefBusy = ref(false)
+const qBusy = ref(false)
+const qCount = ref(3)
+const importing = ref(false)
+const importOpen = ref(false)
+const importTopic = ref('')
+const IMPORT_TOPICS = ['有机化学','高分子化学','晶体化学','无机综合与结构推断','方程式与元素化学','热力学与化学平衡','电化学','动力学','分析化学']
 
 const picking = ref(false)
 const picked = ref({})
@@ -109,28 +115,159 @@ async function run() {
   finally { loading.value = false }
 }
 
+let qTimer = null
+
+function stopQPoll() {
+  if (qTimer) { clearInterval(qTimer); qTimer = null }
+}
+
+async function pollQ(jid) {
+  try {
+    const r = await api.get('/api/ai/smart-questions/jobs/' + jid)
+    if (r.status === 'running') { qBusy.value = true; return }
+    stopQPoll()
+    qBusy.value = false
+    localStorage.removeItem('tiku-sq-job')
+    if (r.status === 'error') throw new Error(r.error || '出题失败')
+    const qs = (r.result && r.result.questions) || []
+    if (!qs.length) throw new Error('AI 没有返回可用的题目，请调小数量或换更短的素材重试')
+    draft.value = qs.map((q) => ({ ...q, id: crypto.randomUUID() }))
+    picked.value = {}
+    msg.value = `已依据文献生成 ${draft.value.length} 道题，可勾选后生成试卷`
+  } catch (e2) {
+    stopQPoll()
+    qBusy.value = false
+    localStorage.removeItem('tiku-sq-job')
+    msg.value = ''
+    err.value = String(e2.message || e2)
+  }
+}
+
+function resumeQJob() {
+  let jid = ''
+  try { jid = localStorage.getItem('tiku-sq-job') || '' } catch (e2) {}
+  if (!jid) return
+  qBusy.value = true
+  msg.value = '继续等待后台出题…'
+  pollQ(jid)
+  qTimer = setInterval(() => pollQ(jid), 3000)
+}
+
+function openImport() {
+  if (!pickedItems.value.length) { err.value = '先勾选要导入题库的题'; return }
+  importTopic.value = ''
+  importOpen.value = true
+}
+
+async function importToBank() {
+  const qs = pickedItems.value
+  if (!qs.length) { err.value = '先勾选要导入题库的题'; return }
+  importing.value = true
+  err.value = ''
+  let ok = 0, dup = 0
+  try {
+    for (const q of qs) {
+      const r = await api.post('/api/questions', {
+        stem: q.stem || '', answer: q.answer || '', analysis: q.analysis || '',
+        q_type: q.q_type || '综合', difficulty: q.difficulty || 3,
+        knowledge_points: importTopic.value ? [importTopic.value] : (q.knowledge_points || []),
+        images: q.images || [], score: q.score || 10,
+      })
+      if (r.deduped) dup += 1; else ok += 1
+    }
+    importOpen.value = false
+    msg.value = `已导入题库 ${ok} 道${dup ? `，${dup} 道重复已跳过` : ''}`
+  } catch (e2) {
+    err.value = String(e2.message || e2)
+  } finally { importing.value = false }
+}
+
+async function genQuestions() {
+  if (!docId.value && !source.value.trim()) { err.value = '请选择一份 PDF，或粘贴文献文字'; return }
+  stopQPoll()
+  qBusy.value = true
+  err.value = ''
+  msg.value = '已转到后台出题，切到别的页面也不会中断…'
+  try {
+    const r = await api.post('/api/ai/smart-questions/jobs', {
+      source: source.value,
+      doc_id: source.value.trim() ? null : docId.value,
+      count: qCount.value,
+      level: level.value,
+      topics: [], types: [], difficulty: 3,
+      extra: focus.value || '',
+    })
+    try { localStorage.setItem('tiku-sq-job', r.job_id) } catch (e2) {}
+    pollQ(r.job_id)
+    qTimer = setInterval(() => pollQ(r.job_id), 3000)
+  } catch (e2) {
+    qBusy.value = false
+    err.value = String(e2.message || e2)
+  }
+}
+
+let briefTimer = null
+
+function stopBriefPoll() {
+  if (briefTimer) { clearInterval(briefTimer); briefTimer = null }
+}
+
+async function pollBrief(jid) {
+  try {
+    const r = await api.get('/api/ai/doc-brief/jobs/' + jid)
+    if (r.status === 'running') { briefBusy.value = true; return }
+    stopBriefPoll()
+    briefBusy.value = false
+    localStorage.removeItem('tiku-brief-job')
+    if (r.status === 'error') throw new Error(r.error || '文献解读失败')
+    brief.value = r.result || null
+    if (brief.value && brief.value.mechanism_figures) {
+      msg.value = '文献解读完成：已标出机理相关图片/结构和关键段落'
+    } else {
+      msg.value = '文献解读完成'
+    }
+  } catch (e2) {
+    stopBriefPoll()
+    briefBusy.value = false
+    localStorage.removeItem('tiku-brief-job')
+    err.value = String(e2.message || e2)
+  }
+}
+
+function resumeBriefJob() {
+  let jid = ''
+  try { jid = localStorage.getItem('tiku-brief-job') || '' } catch (e2) {}
+  if (!jid) return
+  briefBusy.value = true
+  msg.value = '继续等待后台文献解读…'
+  pollBrief(jid)
+  briefTimer = setInterval(() => pollBrief(jid), 3000)
+}
+
 async function runBrief() {
   if (!docId.value && !source.value.trim()) {
     err.value = '请选择一份 PDF，或粘贴文献文字'
     return
   }
+  stopBriefPoll()
   briefBusy.value = true
   err.value = ''
+  msg.value = '文献解读已转到后台，切到别的页面也不会中断…'
   try {
-    const r = await api.post('/api/ai/doc-brief', {
+    const r = await api.post('/api/ai/doc-brief/jobs', {
       source: source.value,
       doc_id: source.value.trim() ? null : docId.value,
-      count: briefCount.value,
+      count: 0,
       level: level.value,
       focus: focus.value,
     })
-    brief.value = r
-    if (r.questions && r.questions.length) {
-      draft.value = [...r.questions.map((q) => ({ ...q, id: crypto.randomUUID() })), ...draft.value]
-    }
-    msg.value = '文献解读完成' + (r.questions && r.questions.length ? `，并生成了 ${r.questions.length} 道改编题` : '')
-  } catch (e) { err.value = String(e.message || e) }
-  finally { briefBusy.value = false }
+    try { localStorage.setItem('tiku-brief-job', r.job_id) } catch (e2) {}
+    pollBrief(r.job_id)
+    briefTimer = setInterval(() => pollBrief(r.job_id), 3000)
+  } catch (e2) {
+    briefBusy.value = false
+    err.value = String(e2.message || e2)
+  }
 }
 
 function pickedIds() { return draft.value.filter((q) => picked.value[q.id]).map((q) => q.id) }
@@ -217,14 +354,17 @@ function preview(q) { return { __html: renderMath(q.stem || '') } }
 onMounted(async () => {
   await loadDocs()
   await loadOutline()
+  resumeBriefJob()
+  resumeQJob()
 })
+onBeforeUnmount(() => { stopBriefPoll(); stopQPoll() })
 </script>
 
 <template>
-  <h2>智能出题</h2>
+  <h2>文献解读</h2>
   <p class="muted" style="margin-top:-8px">
-    先定级别、知识点、题型与难度，AI 一次命制一组竞赛题；也可以让 AI 先把文献读薄
-    （摘要 + 要点 + 对照段落），再据它改编。勾选满意的题即可直接组成新试卷，不写题库。
+    让 AI 把文献读薄：先给摘要，再挑出反应机理、催化循环、关键中间体/结构与相关图注，
+    并附关键段落的原文/译文。解读在后台运行，切页面不会丢。
   </p>
 
   <div v-if="err" class="errbox">{{ err }}</div>
@@ -232,12 +372,6 @@ onMounted(async () => {
 
   <div class="smart">
     <aside class="card panel">
-      <div class="tabs">
-        <button :class="{ on: tab === 'ai' }" @click="tab = 'ai'">AI 出题</button>
-        <button :class="{ on: tab === 'lit' }" @click="tab = 'lit'">文献解读</button>
-        <button :class="{ on: tab === 'src' }" @click="tab = 'src'">素材</button>
-      </div>
-
       <label class="f"><span>文献（可选，选中后直接把整份交给 AI）</span>
         <select v-model="docId" @change="loadOutline">
           <option value="">不使用 PDF</option>
@@ -247,76 +381,32 @@ onMounted(async () => {
         </select>
       </label>
 
-      <template v-if="tab === 'ai'">
-        <h3>竞赛级别</h3>
-        <div class="chips">
-          <button v-for="l in LEVELS" :key="l" class="chipbtn" :class="{ on: level === l }"
-                  @click="level = l">{{ l }}</button>
+      <div class="qgen">
+        <div class="numpick">
+          <button v-for="n in 8" :key="n" :class="{ on: qCount === n }" @click="qCount = n">{{ n }}</button>
         </div>
-
-        <h3>知识点（可多选）</h3>
-        <div class="chips">
-          <button v-for="t in TOPICS" :key="t" class="chipbtn" :class="{ on: topics.includes(t) }"
-                  @click="onTopic(t)">{{ t }}</button>
-        </div>
-
-        <h3>题型</h3>
-        <div class="chips">
-          <button v-for="t in TYPES" :key="t" class="chipbtn" :class="{ on: types.includes(t) }"
-                  @click="onType(t)">{{ t }}</button>
-        </div>
-
-        <label class="f"><span>难度 {{ '★'.repeat(difficulty) }}{{ '☆'.repeat(5 - difficulty) }}</span>
-          <input v-model.number="difficulty" type="range" min="1" max="5" step="1" />
-        </label>
-        <label class="f"><span>题目数量：{{ count }}</span>
-          <input v-model.number="count" type="range" min="1" max="8" step="1" />
-        </label>
-        <label class="f"><span>额外要求（可选）</span>
-          <textarea v-model="extra" rows="2" maxlength="500"
-                    placeholder="如：以过渡金属配合物为背景，含晶胞计算"></textarea>
-        </label>
-
-        <button class="primary" style="width:100%" :disabled="loading" @click="run">
-          {{ loading ? 'AI 正在命题与解析…' : '一键 AI 出题' }}
+        <button class="primary" style="width:100%" :disabled="qBusy" @click="genQuestions">
+          {{ qBusy ? '后台出题中…' : `出题（${qCount} 道）` }}
         </button>
+        <p class="muted sm">先选题数再点「出题」，后台生成，切页面不丢；出完在右侧显示。</p>
+      </div>
 
-        <div v-if="outlineDoc && outlineDoc.sentences && outlineDoc.sentences.length" class="tips">
-          <div class="muted sm">这份文献已识别出 {{ outlineDoc.sentences.length }} 处重点句：</div>
-          <p v-for="s in outlineDoc.sentences.slice(0, 3)" :key="s.id" class="tip">
-            [{{ s.page }} 页] {{ s.text.slice(0, 60) }}…
-          </p>
-          <p class="muted sm">需要逐句读与翻译，去「精读」页。</p>
-        </div>
-      </template>
-
-      <template v-else-if="tab === 'lit'">
+      <template>
         <label class="f"><span>重点关注（可选）</span>
           <textarea v-model="focus" rows="2" maxlength="500"
                     placeholder="如：实验部分、反应机理、晶体结构数据"></textarea>
-        </label>
-        <label class="f"><span>据此出题数量：{{ briefCount }}</span>
-          <input v-model.number="briefCount" type="range" min="0" max="8" step="1" />
         </label>
         <button class="primary" style="width:100%" :disabled="briefBusy" @click="runBrief">
           {{ briefBusy ? 'AI 正在研读文献…' : '解读文献' }}
         </button>
       </template>
 
-      <template v-else>
-        <label class="f"><span>命题素材（题干、文献片段、数据都可以）</span>
-          <textarea v-model="source" rows="9" maxlength="20000"
-                    placeholder="粘贴题干/文献段落；留空则使用上方选中的 PDF"></textarea>
-        </label>
-        <div class="btnrow">
-          <button :disabled="!docId" @click="useDocText">取 PDF 第 1 页文字</button>
-          <button :disabled="!source" @click="source = ''">清空</button>
-        </div>
-        <p class="muted sm">素材只发送给当前配置的模型，不会上传到别处。</p>
-      </template>
     </aside>
 
     <div class="main">
+      <div v-if="!brief" class="card">
+        <p class="muted" style="margin:0">{{ briefBusy ? '正在后台解读文献，可切到别的页面，回来会继续显示…' : '选一份文献 PDF，点左侧「解读文献」。解读在后台运行，切到别的页面不会中断。' }}</p>
+      </div>
       <div v-if="brief" class="card">
         <div class="head">
           <h3 style="margin:0">文献解读<template v-if="brief.title"> · {{ brief.title }}</template></h3>
@@ -327,6 +417,12 @@ onMounted(async () => {
           <div class="subtitle">核心要点</div>
           <ul class="pts">
             <li v-for="(k, i) in brief.key_points" :key="i" v-html="renderMath(k)"></li>
+          </ul>
+        </div>
+        <div v-if="brief.mechanism_figures && brief.mechanism_figures.length" class="cardinner">
+          <div class="subtitle">机理相关图片 / 结构</div>
+          <ul class="pts">
+            <li v-for="(f, i) in brief.mechanism_figures" :key="'fg' + i" v-html="renderMath(f)"></li>
           </ul>
         </div>
         <div v-for="(x, i) in brief.excerpts" :key="i" class="excerpt">
@@ -341,37 +437,27 @@ onMounted(async () => {
         </div>
       </div>
 
-      <div class="card">
+      <div v-if="draft.length" class="card">
         <div class="head">
-          <h3 style="margin:0">生成结果 <span class="muted">{{ draft.length }} 题</span></h3>
+          <h3 style="margin:0">依据文献出的题 <span class="muted">{{ draft.length }} 题</span></h3>
           <div class="btnrow">
-            <button :disabled="picking" @click="pickFromBank">{{ picking ? '读取中…' : '从题库带入' }}</button>
-            <button :disabled="!draft.length" @click="toggleAll">
-              {{ draft.length && draft.every((q) => picked[q.id]) ? '取消全选' : '全选' }}
+            <button :disabled="!draft.length" @click="toggleAll">全选 / 取消</button>
+            <button class="primary" :disabled="!pickedItems.length || importing" @click="openImport">
+              {{ importing ? '导入中…' : '导入题库' }}
             </button>
           </div>
         </div>
-
-        <p v-if="loading" class="muted empty">正在调用 AI 命题，请稍候…</p>
-        <p v-else-if="!draft.length" class="muted empty">在左侧选好条件后点「一键 AI 出题」，或在「从题库带入」挑现成的题。</p>
-
         <div v-for="(q, i) in draft" :key="q.id" class="qitem" :class="{ sel: picked[q.id] }">
           <label class="pick"><input :checked="!!picked[q.id]" type="checkbox" @change="togglePick(q.id)" /></label>
           <div class="qbody">
             <div class="qmeta">
               <b>{{ i + 1 }}.</b>
               <span class="chip brand">{{ q.q_type || '综合' }}</span>
-              <span v-for="k in q.knowledge_points || []" :key="k" class="chip">{{ k }}</span>
               <span class="muted">（{{ q.score || 10 }} 分）</span>
+              <span v-if="q.knowledge_points && q.knowledge_points.length" class="chip">{{ q.knowledge_points[0] }}</span>
               <button class="ghost sm" style="margin-left:auto" @click="drop(q.id)">移除</button>
             </div>
-            <div class="stem" v-html="preview(q).__html"></div>
-            <div v-if="q.images && q.images.length" class="qimgs">
-              <img v-for="(im, ii) in q.images" :key="ii" :src="imgUrl(im)" alt="题图" loading="lazy" />
-            </div>
-            <div v-if="q.options && q.options.length" class="opts">
-              <div v-for="(o, oi) in q.options" :key="oi" v-html="renderMath(o)"></div>
-            </div>
+            <div class="stem" v-html="renderMath(q.stem)"></div>
             <details class="ans">
               <summary>答案与解析</summary>
               <div class="q-answer"><span class="cap">答案</span><span v-html="renderMath(q.answer)"></span></div>
@@ -379,21 +465,30 @@ onMounted(async () => {
             </details>
           </div>
         </div>
+        <div v-if="pickedItems.length" class="buildbar">
+          <b>已选 {{ pickedItems.length }} 题</b>
+          <input v-model="buildTitle" class="title" placeholder="试卷标题（可空）" />
+          <button class="primary" :disabled="building" @click="buildPaper">{{ building ? '正在成卷…' : '生成试卷' }}</button>
+        </div>
       </div>
 
-      <div v-if="pickedItems.length" class="card buildbar">
-        <div>
-          <b>已选 {{ pickedItems.length }} 题</b>
-          <span class="muted">　总分 {{ pickedItems.reduce((s, q) => s + (Number(q.score) || 10), 0) }} 分</span>
-        </div>
-        <div class="btnrow" style="flex:1;justify-content:flex-end">
-          <input v-model="buildTitle" class="title" placeholder="试卷标题（可空）" />
-          <button class="primary" :disabled="building" @click="buildPaper">
-            {{ building ? '正在成卷…' : '生成新试卷' }}
-          </button>
-          <router-link to="/papers"><button>去「试卷」页</button></router-link>
+      <div v-if="importOpen" class="modal" @click.self="importOpen = false">
+        <div class="modal-card">
+          <h3 style="margin:0 0 8px">存入题库</h3>
+          <p class="muted" style="margin:0 0 10px">已勾选 {{ pickedItems.length }} 道题。可指定归入专题；不选则用 AI 自动识别的分类。</p>
+          <label class="f"><span>归入专题</span>
+            <select v-model="importTopic">
+              <option value="">自动识别</option>
+              <option v-for="t in IMPORT_TOPICS" :key="t" :value="t">{{ t }}</option>
+            </select>
+          </label>
+          <div class="btnrow" style="margin-top:12px">
+            <button @click="importOpen = false">取消</button>
+            <button class="primary" :disabled="importing" @click="importToBank">{{ importing ? '导入中…' : '确认导入' }}</button>
+          </div>
         </div>
       </div>
+
     </div>
   </div>
 </template>
@@ -405,6 +500,12 @@ onMounted(async () => {
 .tabs button { flex: 1; padding: 6px 8px; font-size: 13px; }
 .tabs button.on { background: var(--brand); border-color: var(--brand); color: #fff; font-weight: 600; }
 .panel h3 { font-size: 13.5px; margin: 14px 0 6px; color: #344054; }
+.modal { position: fixed; inset: 0; background: rgba(15,23,42,.35); display: grid; place-items: center; z-index: 60; }
+.modal-card { width: min(420px, 92vw); background: #fff; border-radius: 12px; padding: 18px; box-shadow: 0 20px 50px rgba(15,23,42,.25); }
+.qgen { margin: 10px 0 14px; padding: 10px; border: 1px solid #dbe4f3; border-radius: 10px; background: #f8fbff; }
+.numpick { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 8px; }
+.numpick button { padding: 3px 9px; border-radius: 6px; }
+.numpick button.on { background: var(--brand); border-color: var(--brand); color: #fff; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chipbtn {
   padding: 3px 10px; border-radius: 999px; font-size: 12.5px; line-height: 1.6;

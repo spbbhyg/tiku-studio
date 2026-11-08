@@ -9,8 +9,24 @@ import json
 import os
 from pathlib import Path
 
-APP_DIR = Path(__file__).resolve().parent            # apps/api/app
-ROOT = APP_DIR.parents[2]                            # 仓库根目录
+APP_DIR = Path(__file__).resolve().parent            # apps/api/app（冻结后位于 _internal/app）
+
+def _resolve_root() -> Path:
+    """仓库根 / 独立版安装目录。
+
+    - 有 TIKU_ROOT 环境变量就用它；
+    - 冻结成 exe 时，根目录是 exe 所在目录（data/、services/、runtime/ 都放这里）；
+    - 开发态仍是仓库根。
+    """
+    env = os.environ.get("TIKU_ROOT")
+    if env:
+        return Path(env).resolve()
+    import sys
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return APP_DIR.parents[2]
+
+ROOT = _resolve_root()
 
 WEB_DIST = Path(os.environ.get("TIKU_WEB_DIST", ROOT / "apps" / "web" / "dist"))
 

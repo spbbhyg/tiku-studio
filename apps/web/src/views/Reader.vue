@@ -1,7 +1,9 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { api } from '../api.js'
 
+const router = useRouter()
 const docs = ref([])
 const docId = ref('')
 const outline = ref(null)
@@ -15,6 +17,10 @@ const activeId = ref('')
 const notes = ref({})
 
 const showMarks = ref(true)
+const annot = reactive({ on: false, tool: 'pen', color: '#e11d48', size: 3 })
+const annotCanvas = ref(null)
+const strokes = ref({})
+let drawing = null
 const showRuns = ref(true)
 const settings = ref({ fontSize: 'md', color: 'ink', lineHeight: 1.6 })
 const FONT_PX = { sm: 14, md: 16, lg: 19 }
@@ -81,6 +87,7 @@ async function loadTextLayer() {
 
 function syncStageH() {
   stageH.value = pageImg.value ? pageImg.value.clientHeight : 0
+  if (annot.on) sizeAnnotCanvas()
 }
 
 function lineStyle(l) {
@@ -116,12 +123,18 @@ async function translateSelection() {
 async function selectionToAuthoring() {
   if (!sel.value) return
   const parts = [sel.value.text, sel.value.translation].filter(Boolean).join('\n\n')
-  sessionStorage.setItem('tiku:seed', JSON.stringify({
+  // 选中段落 → 直接开一张人工整卷，题干预填这段、出处自动带上 doc_id / 页码
+  sessionStorage.setItem('tiku:exam-seed', JSON.stringify({
     text: parts,
-    source_title: activeDoc.value?.filename || '',
-    source_citation: `第 ${pageNo.value} 页`,
+    source: {
+      doc_id: docId.value,
+      page: pageNo.value,
+      kind: 'text',
+      title: activeDoc.value?.filename || '',
+      quote: (sel.value.text || '').slice(0, 120),
+    },
   }))
-  msg.value = '已把选中的文字放到「出题」页的素材区。'
+  router.push('/papers/new')
 }
 
 function clearSelection() { sel.value = null }
@@ -131,6 +144,7 @@ const translating = ref({})
 const translateErr = ref({})
 const batch = ref(null)
 const exporting = ref(false)
+const lastExport = ref(null)   // { path, dir, file, size } 最近一次导出
 const expSettings = ref({ fontSize: 'md', color: 'ink', lineHeight: 1.6, underline: true, appendix: true })
 
 function noteOf(id) { return notes.value[id] || { translation: '', note: '' } }
@@ -178,7 +192,7 @@ async function loadOutline() {
     sel.value = null
     await loadTextLayer()
     if (!d.has_text) {
-      msg.value = '这份 PDF 没有文字层（扫描件）。重点句识别需要文字：可直接裁剪成图片题，或在「出题」页用 AI 逐页精读。'
+      msg.value = '这份 PDF 没有文字层（扫描件）。重点句识别需要文字：可直接裁剪成图片题。'
     } else if (!(d.sentences || []).length) {
       msg.value = '没有识别到明显的小标题或高价值句，换一份排版规整的文献更准，也可在左侧手动点选。'
     } else {
@@ -245,6 +259,7 @@ async function exportPdf() {
   if (!docId.value || !sentences.value.length) return
   exporting.value = true
   err.value = ''
+  lastExport.value = null
   try {
     const items = sentences.value.map((s) => ({
       number: numbers.value[s.id],
@@ -254,26 +269,34 @@ async function exportPdf() {
       translation: noteOf(s.id).translation,
       label: `[${numbers.value[s.id]}]`,
     }))
-    const res = await fetch('/api/reader/export', {
+    const payload = { doc_id: docId.value, items, name: activeDoc.value?.filename || '', ...expSettings.value }
+    const res = await fetch('/api/reader/export-file', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ doc_id: docId.value, items, ...expSettings.value }),
+      body: JSON.stringify(payload),
     })
     if (!res.ok) {
       let detail = await res.text()
       try { detail = JSON.parse(detail).detail || detail } catch (e) { /* keep */ }
       throw new Error(detail || `导出失败（${res.status}）`)
     }
-    const blob = await res.blob()
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${(activeDoc.value?.filename || '文献').replace(/\.pdf$/i, '')}-标注版.pdf`
-    a.click()
-    setTimeout(() => URL.revokeObjectURL(url), 30000)
-    msg.value = '已导出标注版 PDF：原文带下划线与编号，末尾附译文附录。'
+    const data = await res.json()
+    lastExport.value = data
+    msg.value = `已生成标注版 PDF（${(data.size / 1024 / 1024).toFixed(1)} MB）：${data.file}`
   } catch (e) { err.value = String(e.message || e) }
   finally { exporting.value = false }
+}
+
+async function revealExport() {
+  if (!lastExport.value) return
+  try {
+    await api.post('/api/reader/reveal', { path: lastExport.value.path })
+  } catch (e) { err.value = String(e.message || e) }
+}
+
+function openExport() {
+  if (!lastExport.value) return
+  window.open(lastExport.value.url, '_blank')
 }
 
 async function sendToAuthoring() {
@@ -296,6 +319,103 @@ async function sendToAuthoring() {
 watch(docId, loadOutline)
 watch(pageNo, () => { sel.value = null; loadTextLayer() })
 watch(showRuns, (v) => { if (v) loadTextLayer() })
+const annoKey = computed(() => `${docId.value}:${pageNo.value}`)
+
+function annoList() {
+  if (!strokes.value[annoKey.value]) strokes.value[annoKey.value] = []
+  return strokes.value[annoKey.value]
+}
+
+function drawStroke(ctx, st, w, h) {
+  if (!st.points || !st.points.length) return
+  ctx.save()
+  ctx.globalCompositeOperation = st.tool === 'eraser' ? 'destination-out' : 'source-over'
+  ctx.strokeStyle = st.color || '#e11d48'
+  ctx.lineWidth = st.tool === 'eraser' ? Math.max(8, (st.size || 3) * 3) : (st.size || 3)
+  ctx.lineCap = 'round'
+  ctx.lineJoin = 'round'
+  ctx.beginPath()
+  st.points.forEach((pt, i) => {
+    const x = pt[0] * w, y = pt[1] * h
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y)
+  })
+  if (st.points.length === 1) ctx.lineTo(st.points[0][0] * w + 0.1, st.points[0][1] * h + 0.1)
+  ctx.stroke()
+  ctx.restore()
+}
+
+function redrawAnnot() {
+  const cv = annotCanvas.value
+  if (!cv || !cv.width || !cv.height) return
+  const ctx = cv.getContext('2d')
+  ctx.clearRect(0, 0, cv.width, cv.height)
+  for (const st of annoList()) drawStroke(ctx, st, cv.width, cv.height)
+}
+
+function sizeAnnotCanvas() {
+  const cv = annotCanvas.value
+  const img = pageImg.value
+  if (!cv || !img) return
+  const w = img.clientWidth, h = img.clientHeight
+  if (!w || !h) return
+  cv.width = w; cv.height = h
+  redrawAnnot()
+}
+
+async function toggleAnnot() {
+  annot.on = !annot.on
+  if (annot.on) { await nextTick(); sizeAnnotCanvas() }
+}
+
+function annoPos(e) {
+  const cv = annotCanvas.value
+  const r = cv.getBoundingClientRect()
+  return [Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
+          Math.min(1, Math.max(0, (e.clientY - r.top) / r.height))]
+}
+
+function annoDown(e) {
+  if (!annot.on) return
+  e.preventDefault()
+  const cv = annotCanvas.value
+  if (!cv) return
+  const st = { tool: annot.tool, color: annot.color, size: annot.size, points: [annoPos(e)] }
+  annoList().push(st)
+  drawing = st
+  cv.setPointerCapture?.(e.pointerId)
+}
+
+function annoMove(e) {
+  if (!drawing || !annot.on) return
+  e.preventDefault()
+  const pt = annoPos(e)
+  const last = drawing.points[drawing.points.length - 1]
+  if (last && Math.hypot(pt[0] - last[0], pt[1] - last[1]) < 0.002) return
+  drawing.points.push(pt)
+  const cv = annotCanvas.value
+  const ctx = cv.getContext('2d')
+  ctx.save()
+  ctx.globalCompositeOperation = drawing.tool === 'eraser' ? 'destination-out' : 'source-over'
+  ctx.strokeStyle = drawing.color
+  ctx.lineWidth = drawing.tool === 'eraser' ? Math.max(8, drawing.size * 3) : drawing.size
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round'
+  ctx.beginPath()
+  ctx.moveTo(last[0] * cv.width, last[1] * cv.height)
+  ctx.lineTo(pt[0] * cv.width, pt[1] * cv.height)
+  ctx.stroke()
+  ctx.restore()
+}
+
+function annoUp() { drawing = null }
+
+function clearAnnot() {
+  strokes.value[annoKey.value] = []
+  redrawAnnot()
+}
+
+watch(pageNo, async () => { await nextTick(); if (annot.on) sizeAnnotCanvas() })
+watch(docId, async () => { await nextTick(); if (annot.on) sizeAnnotCanvas() })
+
 onMounted(loadDocs)
 </script>
 
@@ -374,6 +494,14 @@ onMounted(loadDocs)
             <option :value="2">200%</option>
             <option :value="3">300%</option>
           </select>
+          <button :class="{ on: annot.on }" @click="toggleAnnot">✎ 批注</button>
+          <template v-if="annot.on">
+            <button :class="{ on: annot.tool === 'pen' }" @click="annot.tool = 'pen'">画笔</button>
+            <button :class="{ on: annot.tool === 'eraser' }" @click="annot.tool = 'eraser'">橡皮擦</button>
+            <input v-model="annot.color" type="color" style="width:30px;height:26px;padding:0;border:1px solid #d0d5dd;border-radius:4px" />
+            <input v-model.number="annot.size" type="range" min="1" max="12" style="width:90px" />
+            <button @click="clearAnnot">清除本页</button>
+          </template>
         </div>
         <div class="pagescroll">
           <div v-if="pageUrl" class="pagewrap">
@@ -381,6 +509,9 @@ onMounted(loadDocs)
             <div v-if="showRuns && textLines.length" class="textlayer" @mouseup="onPageMouseUp">
               <span v-for="(l, i) in textLines" :key="i" class="tl" :style="lineStyle(l)">{{ l.text }}</span>
             </div>
+            <canvas v-if="annot.on" ref="annotCanvas" class="annotcanvas"
+                    @pointerdown="annoDown" @pointermove="annoMove" @pointerup="annoUp" @pointerleave="annoUp"
+                    @pointercancel="annoUp"></canvas>
             <template v-if="showMarks">
               <template v-for="s in pageSentences" :key="s.id">
                 <span v-for="(r, ri) in s.rects" :key="s.id + '-' + ri" class="mark"
@@ -444,7 +575,7 @@ onMounted(loadDocs)
             <button :disabled="sel.busy || !!sel.translation" @click="translateSelection">
               {{ sel.translation ? '已翻译' : '翻译这段' }}
             </button>
-            <button @click="selectionToAuthoring">送去出题</button>
+            <button class="primary" @click="selectionToAuthoring">用这段出题</button>
           </div>
         </div>
 
@@ -475,6 +606,13 @@ onMounted(loadDocs)
           <button style="width:100%" :disabled="exporting || !sentences.length" @click="exportPdf">
             {{ exporting ? '正在生成…' : '导出标注版 PDF' }}
           </button>
+          <div v-if="lastExport" class="expsaved">
+            <div class="p" :title="lastExport.path">{{ lastExport.path }}</div>
+            <div class="acts">
+              <button class="ghost sm" @click="revealExport">打开所在文件夹</button>
+              <button class="ghost sm" @click="openExport">预览</button>
+            </div>
+          </div>
         </div>
 
         <div class="card inner">
@@ -546,6 +684,7 @@ onMounted(loadDocs)
 .pagescroll { max-height: 76vh; overflow: auto; padding: 14px; background: #f8fafc; }
 .pagewrap { position: relative; width: fit-content; margin: 0 auto; box-shadow: 0 6px 20px rgba(16, 24, 40, .1); background: #fff; }
 .pagewrap img { display: block; max-width: 100%; }
+.annotcanvas { position: absolute; inset: 0; z-index: 20; cursor: crosshair; touch-action: none; }
 .textlayer { position: absolute; inset: 0; z-index: 2; }
 .tl {
   position: absolute; color: transparent; overflow: hidden; white-space: pre;
@@ -582,4 +721,8 @@ onMounted(loadDocs)
   .nav { max-height: 40vh; }
   .side { grid-template-columns: 1fr; }
 }
+
+.expsaved { margin-top: 6px; background: #f0f7ff; border: 1px solid #cfe2ff; border-radius: 8px; padding: 8px; }
+.expsaved .p { font-size: 11px; color: #33507a; word-break: break-all; margin-bottom: 6px; }
+.expsaved .acts { display: flex; gap: 6px; }
 </style>

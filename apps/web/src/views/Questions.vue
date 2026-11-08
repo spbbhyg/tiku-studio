@@ -186,7 +186,6 @@ const newSet = reactive({ name: '', year: new Date().getFullYear(), busy: false 
 const vers = ref(null)            // { q, items, busy }
 
 const showImport = ref(false)
-const qf = reactive({ found: false, db_path: '', banks: [], hint: '', busy: '', result: null, picked: [] })
 const paperImp = reactive({ busy: false, title: '', result: null, err: '' })
 
 const topicTags = computed(() => {
@@ -556,50 +555,11 @@ async function deleteOne(id) {
   } catch (e) { err.value = e.message }
 }
 
-// ---------------------------------------------------------------- QuizForge 导入
+// ---------------------------------------------------------------- 导入整卷
 async function openImport() {
   showImport.value = true
-  qf.result = null
-  qf.busy = ''
-  try {
-    const data = await api.get('/api/import/quizforge')
-    qf.found = data.found
-    qf.db_path = data.db_path || ''
-    qf.banks = data.banks || []
-    qf.hint = data.hint || ''
-    qf.picked = qf.banks.map((b) => b.id)
-  } catch (e) { qf.hint = e.message }
-}
-
-async function runImport() {
-  qf.busy = 'path'
-  err.value = ''
-  try {
-    const data = await api.post('/api/import/quizforge', { bank_ids: qf.picked })
-    qf.result = data
-    msg.value = `导入完成：新增 ${data.questions_created} 题，补全 ${data.questions_updated} 题`
-    showImport.value = false
-    await Promise.all([load(), loadTopics()])
-  } catch (e) { err.value = e.message }
-  qf.busy = ''
-}
-
-async function uploadDb(event) {
-  const file = event.target.files && event.target.files[0]
-  if (!file) return
-  qf.busy = 'file'
-  err.value = ''
-  const fd = new FormData()
-  fd.append('file', file)
-  try {
-    const data = await api.postForm('/api/import/quizforge/upload', fd)
-    qf.result = data
-    msg.value = `导入完成：新增 ${data.questions_created} 题，补全 ${data.questions_updated} 题`
-    showImport.value = false
-    await load()
-  } catch (e) { err.value = e.message }
-  qf.busy = ''
-  event.target.value = ''
+  paperImp.err = ''
+  paperImp.result = null
 }
 
 async function uploadPaper(event) {
@@ -797,7 +757,6 @@ onMounted(async () => {
     </template>
     <span class="spacer"></span>
     <button class="ghost" :disabled="paperBusy" @click="openAuto">自动组卷</button>
-    <button class="ghost" :disabled="!total" @click="showExport = true">导出</button>
   </div>
 
   <div v-if="loading" class="muted">加载中…</div>
@@ -925,33 +884,7 @@ onMounted(async () => {
     <img :src="zoomImg" alt="放大" />
   </div>
 
-  <!-- 导出面板 -->
-  <div v-if="showExport" class="modal" @click.self="showExport = false">
-    <div class="modal-card">
-      <h3>导出 {{ selList.length ? `所选 ${selList.length} 题` : `全部 ${total} 题（按当前筛选）` }}</h3>
-      <label class="f"><span>文档标题</span><input v-model="exportOpts.title" /></label>
-      <label class="f"><span>答案位置</span>
-        <select v-model="exportOpts.answers">
-          <option value="appendix">卷末统一（题目页干净）</option>
-          <option value="inline">每题下方</option>
-          <option value="none">不含答案</option>
-        </select>
-      </label>
-      <div class="frow">
-        <label class="chk"><input v-model="exportOpts.analysis" type="checkbox" /> 含解析</label>
-        <label class="chk"><input v-model="exportOpts.tags" type="checkbox" /> 含标签</label>
-        <label class="chk"><input v-model="exportOpts.source" type="checkbox" /> 含出处</label>
-      </div>
-      <div class="btnrow">
-        <button class="primary" :disabled="!!exporting" @click="doExport('docx')">下载 Word（.docx）</button>
-        <button :disabled="!!exporting" @click="doExport('pdf')">下载 PDF</button>
-        <button :disabled="!!exporting" @click="doExport('md')">下载 Markdown</button>
-        <button class="ghost" @click="showExport = false">取消</button>
-      </div>
-      <p class="muted" style="font-size:12px">公式会渲染成清晰的小图嵌入文档；PDF 用等线排版，可直接打印。</p>
-    </div>
-  </div>
-
+  
   <!-- 组卷（原「组卷」页并入题库） -->
   <div v-if="showPaper" class="modal" @click.self="showPaper = false">
     <div class="modal-card" style="max-width:760px">
@@ -1103,42 +1036,10 @@ onMounted(async () => {
     </div>
   </div>
 
-  <!-- QuizForge 导入 -->
+  <!-- 导入整卷 -->
   <div v-if="showImport" class="modal" @click.self="showImport = false">
     <div class="modal-card">
-      <h3>导入题目 / 试卷</h3>
-      <p class="muted" style="font-size:12.5px">
-        内置适配器会把 QuizForge 的「题库 → 题目」映射成这里的「书册 → 题目」，
-        题型、选项、答案、解析、页码一并带过来；重复导入只补全空字段，不会重复建题。
-      </p>
-      <div class="qfpath">
-        <b>库文件：</b>
-        <code v-if="qf.found">{{ qf.db_path }}</code>
-        <span v-else class="muted">{{ qf.hint || '没找到 quizforge.db' }}</span>
-      </div>
-      <div v-if="qf.banks.length" class="qfbank">
-        <label v-for="b in qf.banks" :key="b.id" class="chk">
-          <input v-model="qf.picked" type="checkbox" :value="b.id" />
-          {{ b.name }} <span class="muted">（{{ b.question_count }} 题）</span>
-        </label>
-      </div>
-      <div class="btnrow">
-        <button class="primary" :disabled="!qf.banks.length || qf.busy === 'path'" @click="runImport">
-          {{ qf.busy === 'path' ? '导入中…' : `导入所选（${qf.picked.length} 个题库）` }}
-        </button>
-        <label class="upload sm-upload">
-          <input type="file" accept=".db,.sqlite,.sqlite3" @change="uploadDb" />
-          <span>{{ qf.busy === 'file' ? '上传导入中…' : '或上传 quizforge.db 文件' }}</span>
-        </label>
-        <button class="ghost" @click="showImport = false">取消</button>
-      </div>
-      <div v-if="qf.result" class="okbox">
-        新增 {{ qf.result.questions_created }} 题，补全 {{ qf.result.questions_updated }} 题，
-        新建书册 {{ qf.result.books_created }} 个
-      </div>
-
-      <hr style="margin:16px 0;border:none;border-top:1px solid var(--line)" />
-      <h3 style="font-size:15px">或导入整张试卷（PDF，可多份）</h3>
+      <h3>导入整卷（PDF，可多份）</h3>
       <p class="muted" style="font-size:12.5px">
         可一次选「题目卷 + 答案卷」两份（最多 8 份），系统逐页取文字（扫描页自动 OCR），
         交给 AI 按题号把题目和答案配对、拆题并归类。中文文件名可以直接选。

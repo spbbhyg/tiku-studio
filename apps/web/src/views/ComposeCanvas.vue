@@ -602,7 +602,7 @@ async function loadExisting(id) {
 function fitScale() {
   const host = canvasEl.value ? canvasEl.value.parentElement : null
   const w = host ? host.clientWidth : 800
-  scale.value = clamp((w - 56) / PW, 0.55, 1.15)
+  scale.value = clamp((w - 40) / PW, 0.55, 2.6)
 }
 
 let ro = null

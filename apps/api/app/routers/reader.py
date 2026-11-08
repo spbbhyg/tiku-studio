@@ -8,7 +8,12 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
 from urllib.parse import quote
+
+import re
+import subprocess
+import time
 
 import fitz
 from fastapi import APIRouter, Depends, HTTPException, Response
@@ -23,6 +28,9 @@ from ..services import ai as ai_svc
 from ..services import key_sentences as ks
 
 router = APIRouter(prefix="/api/reader", tags=["reader"])
+
+# 标注版 PDF 落地目录：让用户能在资源管理器里直接找到（不再只是浏览器下载）
+EXPORT_DIR = LIBRARY_DIR.parent / "exports"
 
 MARK_COLOR = (0.145, 0.388, 0.922)          # #2563eb
 TEXT_COLOR = {"ink": (0.06, 0.09, 0.165), "blue": (0.114, 0.306, 0.847),
@@ -40,6 +48,18 @@ def _doc_path(doc_id: str):
 
 
 # ---------------------------------------------------------------- 重点句 / 章节
+def _clean_text(o):
+    """PDF 里偶尔出现 U+1D535 这类非 BMP 字符被拆成孤立代理对，JSON 编码会炸；
+    这里统一按 utf-8 可编码形式清洗（不可编码字符替换掉）。"""
+    if isinstance(o, str):
+        return o.encode("utf-8", "replace").decode("utf-8")
+    if isinstance(o, list):
+        return [_clean_text(x) for x in o]
+    if isinstance(o, dict):
+        return {k: _clean_text(v) for k, v in o.items()}
+    return o
+
+
 @router.get("/doc/{doc_id}/outline")
 def doc_outline(doc_id: str, db: Session = Depends(get_db)):
     """整篇的重点句、章节结构与已存批注（本地识别，不走 AI）。"""
@@ -58,7 +78,7 @@ def doc_outline(doc_id: str, db: Session = Depends(get_db)):
         "note": r.note or "",
         "page_no": r.page_no,
     } for r in rows}
-    return data
+    return _clean_text(data)
 
 
 # ---------------------------------------------------------------- 批注
@@ -126,6 +146,7 @@ class ExportIn(BaseModel):
     line_height: float = 1.6
     underline: bool = True
     appendix: bool = True
+    name: str | None = None          # 前端传原始文件名，导出文件用它命名
 
 
 def _wrap(text: str, font: "fitz.Font", size: float, width: float) -> list[str]:
@@ -322,3 +343,61 @@ def _append_pages(doc: "fitz.Document", entries: list[dict], size: float,
             write(_wrap(source, font, size * 0.82, content_w), size * 0.82, (0.39, 0.45, 0.55))
         write(_wrap(translation, font, size, content_w), size, color)
         y += size * 0.9
+
+
+# ---------- 标注版 PDF：落盘到 data/exports/，便于定位 ----------
+
+def _safe_name(name: str) -> str:
+    cleaned = re.sub(r'[\\/:*?"<>|\r\n\t]+', "-", name).strip(" .-")
+    return (cleaned or "document")[:60]
+
+
+@router.post("/export-file")
+def export_annotated_file(body: ExportIn):
+    """导出标注版 PDF 到 data/exports/ 并返回真实路径。"""
+    resp = export_annotated(body)
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    base = _safe_name((body.name or "").rsplit(".", 1)[0] or _doc_path(body.doc_id).stem)
+    name = f"{base}-标注版-{stamp}.pdf"
+    out = EXPORT_DIR / name
+    out.write_bytes(resp.body)
+    return {
+        "ok": True,
+        "path": str(out),
+        "dir": str(EXPORT_DIR),
+        "file": name,
+        "size": out.stat().st_size,
+        "url": f"/api/reader/exports/{quote(name)}",
+    }
+
+
+@router.post("/reveal")
+def reveal_export(payload: dict):
+    """在资源管理器中定位到导出的文件（Windows）。"""
+    raw = str((payload or {}).get("path") or "").strip()
+    target = Path(raw) if raw else EXPORT_DIR
+    if not target.exists():
+        target = EXPORT_DIR
+        if not target.exists():
+            raise HTTPException(404, "还没有导出过文件")
+    try:
+        if target.is_file():
+            subprocess.Popen(["explorer", "/select,", str(target)])
+        else:
+            subprocess.Popen(["explorer", str(target)])
+    except Exception as exc:                                 # noqa: BLE001
+        raise HTTPException(500, f"打开资源管理器失败：{exc}") from exc
+    return {"ok": True, "path": str(target)}
+
+
+@router.get("/exports/{name}")
+def get_export(name: str):
+    """取回已导出的 PDF（预览/下载）。"""
+    target = EXPORT_DIR / name
+    if not target.exists():
+        matches = [f for f in EXPORT_DIR.glob("*.pdf") if f.name == name]
+        if not matches:
+            raise HTTPException(404, "文件不存在")
+        target = matches[0]
+    return Response(content=target.read_bytes(), media_type="application/pdf")

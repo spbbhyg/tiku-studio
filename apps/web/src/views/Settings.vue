@@ -41,6 +41,28 @@ const stats = ref(null)
 
 const store = ref(null)              // /api/settings/storage
 const newDir = ref('')
+const clean = ref(null)
+const cleaning = ref(false)
+const cleanMsg = ref('')
+const fmtBytes = (n) => {
+  if (!n) return '0 B'
+  if (n < 1024) return n + ' B'
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB'
+  return (n / 1048576).toFixed(1) + ' MB'
+}
+async function scanClean() {
+  try { clean.value = await api.get('/api/wb/cleanup/scan') } catch (e) { cleanMsg.value = String(e.message || e) }
+}
+async function doClean() {
+  if (!clean.value) return
+  if (!confirm('清理后可回收的废弃图片与 7 天前的临时 PDF / 导出文件？（题库里在用的不会删）')) return
+  cleaning.value = true
+  try {
+    const r = await api.post('/api/wb/cleanup', {})
+    cleanMsg.value = `已清理 ${r.removed} 个文件，释放 ${fmtBytes(r.freed_bytes)}`
+    await scanClean()
+  } catch (e) { cleanMsg.value = String(e.message || e) } finally { cleaning.value = false }
+}
 const busy = ref(false)
 const restarting = ref(false)
 
@@ -124,6 +146,34 @@ const dupWarn = computed(() => {
 const ai = reactive({ api_key: '', base_url: 'https://api.deepseek.com', model: 'deepseek-chat' })
 
 // 服务商预设：填好 Base URL 与模型名，只用粘一个 Key（都不需要 DSH）
+const emb = ref({ ok: false, note: '', models: [], model: '' })
+const embBusy = ref(false)
+const embMsg = ref('')
+
+async function loadEmbedded() {
+  try {
+    const d = await api.get('/api/ai/embedded')
+    emb.value = { ok: !!d.ok, note: d.note || '', models: d.models || [], model: d.model || '' }
+  } catch (e) { emb.value = { ok: false, note: String(e), models: [], model: '' } }
+}
+async function startEmbedded() {
+  embBusy.value = true; embMsg.value = ''
+  try {
+    const d = await api.post('/api/ai/embedded/start', {})
+    embMsg.value = d.ok ? '内置服务已就绪' : (d.error || '启动失败')
+    await loadEmbedded()
+  } catch (e) { embMsg.value = String(e) } finally { embBusy.value = false }
+}
+async function useEmbedded() {
+  embBusy.value = true; embMsg.value = ''
+  try {
+    const d = await api.post('/api/ai/embedded/use', { model: emb.value.model || '' })
+    embMsg.value = '已切到内置模型：' + (d.model || '')
+    await load()
+  } catch (e) { embMsg.value = String(e) } finally { embBusy.value = false }
+}
+onMounted(loadEmbedded)
+
 const PRESETS = [
   { k: 'zhipu', name: '智谱 GLM-4-Flash（免费）', base: 'https://open.bigmodel.cn/api/paas/v4',
     model: 'glm-4-flash', hint: '注册 bigmodel.cn 即送免费额度，OpenAI 兼容' },
@@ -131,8 +181,8 @@ const PRESETS = [
     model: 'qwen-flash', hint: 'bailian.console.aliyun.com 开通后拿 Key' },
   { k: 'deepseek', name: 'DeepSeek 官方（便宜）', base: 'https://api.deepseek.com',
     model: 'deepseek-chat', hint: 'platform.deepseek.com 充值即用' },
-  { k: 'dsh', name: '本机 DSH 免费网关（需开 DSH）', base: 'http://127.0.0.1:8326/v1',
-    model: 'our-free-model/mimo-v2.6-flash-free', hint: '完全免费，但 DSH 必须在后台运行' },
+  { k: 'builtin', name: '内置免费模型（随应用启动）', base: 'http://127.0.0.1:18903/v1',
+    model: 'deepseek-v4.1-flash-free', hint: '应用自带，不用 Key、不用装别的，直接可用' },
   { k: 'custom', name: '自定义（任意 OpenAI 兼容）', base: '', model: '', hint: '自己填 Base URL 与模型名' },
 ]
 const preset = ref('zhipu')
@@ -143,6 +193,11 @@ function applyPreset() {
   if (p.model) ai.model = p.model
 }
 const presetHint = computed(() => (PRESETS.find((x) => x.k === preset.value) || {}).hint || '')
+function guessPreset() {
+  const u = String(ai.base_url || '')
+  const hit = PRESETS.find((p) => p.base && u.startsWith(p.base.replace(/\/+$/, '')))
+  preset.value = hit ? hit.k : 'custom'
+}
 const aiInfo = reactive({ has_key: false, key_hint: '', source: '', env_override: false, configured: false, ocr_available: false })
 const aiBusy = ref(false)
 const aiMsg = ref('')
@@ -183,7 +238,8 @@ async function useFree() {
     ai.base_url = r.base_url || ai.base_url
     ai.model = r.model || ai.model
     ai.api_key = ''
-    aiMsg.value = '已切换为本机免费模型，AI 功能立即生效（需要 DeepSeek Harness 保持运行）'
+    guessPreset()
+    aiMsg.value = '已切换为内置免费模型，AI 功能立即生效'
   } catch (e) { aiErr.value = e.message } finally { aiBusy.value = false }
 }
 
@@ -212,6 +268,7 @@ async function loadAi() {
     ai.model = r.model || ai.model
     Object.assign(aiInfo, r)
     ai.api_key = ''
+    guessPreset()
   } catch (e) { aiErr.value = e.message }
 }
 
@@ -244,10 +301,81 @@ async function testAi() {
   } catch (e) { aiErr.value = e.message } finally { aiBusy.value = false }
 }
 
+/* ---------------- 公共题库（GitHub 同步） ---------------- */
+const gh = ref(null)
+const ghBusy = ref('')
+const ghMsg = ref('')
+const ghErr = ref('')
+const ghTok = ref('')
+const ghOwner = ref('')
+const ghRepo = ref('')
+const ghMirror = ref('')
+const ghDrafts = ref(false)
+
+async function loadGh() {
+  try {
+    gh.value = await api.get('/api/github/status')
+    ghOwner.value = gh.value.owner
+    ghRepo.value = gh.value.repo
+    ghMirror.value = gh.value.mirror
+  } catch (e) { ghErr.value = e.message || String(e) }
+}
+
+async function ghSaveCfg() {
+  ghBusy.value = 'cfg'; ghErr.value = ''; ghMsg.value = ''
+  try {
+    await api.post('/api/github/config', { owner: ghOwner.value, repo: ghRepo.value, mirror: ghMirror.value })
+    await loadGh()
+    ghMsg.value = '仓库设置已保存'
+  } catch (e) { ghErr.value = e.message || String(e) } finally { ghBusy.value = '' }
+}
+
+async function ghSaveToken() {
+  if (!ghTok.value.trim()) { ghErr.value = '先把令牌粘贴进来'; return }
+  ghBusy.value = 'token'; ghErr.value = ''; ghMsg.value = ''
+  try {
+    const r = await api.post('/api/github/token', { token: ghTok.value.trim() })
+    ghTok.value = ''
+    await loadGh()
+    ghMsg.value = `令牌已保存（GitHub 账号 ${r.login}）`
+  } catch (e) { ghErr.value = e.message || String(e) } finally { ghBusy.value = '' }
+}
+
+async function ghClearToken() {
+  if (!confirm('删除本机保存的令牌？删除后将无法发布，但仍可一键更新。')) return
+  ghBusy.value = 'token'
+  try {
+    await api.del('/api/github/token')
+    await loadGh()
+    ghMsg.value = '令牌已删除'
+  } catch (e) { ghErr.value = e.message || String(e) } finally { ghBusy.value = '' }
+}
+
+async function ghPublish() {
+  const n = ghDrafts.value ? gh.value.local.confirmed + gh.value.local.drafts : gh.value.local.confirmed
+  if (!confirm(`把 ${n} 道题发布到 ${ghOwner.value}/${ghRepo.value}？\n发布后会追加一个新包，别人点「一键更新」就能拿到。`)) return
+  ghBusy.value = 'publish'; ghErr.value = ''; ghMsg.value = ''
+  try {
+    const r = await api.post('/api/github/publish', { include_drafts: ghDrafts.value })
+    await loadGh()
+    ghMsg.value = `已发布第 ${r.seq} 包：${r.questions} 题、${r.images} 张图（${(r.bytes / 1048576).toFixed(2)} MB）`
+  } catch (e) { ghErr.value = e.message || String(e) } finally { ghBusy.value = '' }
+}
+
+async function ghPull() {
+  ghBusy.value = 'pull'; ghErr.value = ''; ghMsg.value = ''
+  try {
+    const r = await api.post('/api/github/pull', {})
+    await loadGh()
+    ghMsg.value = r.up_to_date ? '已经是最新的了' : `已更新：新增 ${r.updated} 题（跳过重复 ${r.skipped} 题），当前第 ${r.seq} 包`
+  } catch (e) { ghErr.value = e.message || String(e) } finally { ghBusy.value = '' }
+}
+
 onMounted(() => {
   load()
   loadStore()
   loadAi()
+  loadGh()
   window.addEventListener('keydown', onKeydown, true)
 })
 onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
@@ -260,7 +388,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
     <button class="tab" :class="{ on: tab === 'general' }" @click="tab = 'general'">常规</button>
     <button class="tab" :class="{ on: tab === 'ai' }" @click="tab = 'ai'">AI 模型</button>
     <button class="tab" :class="{ on: tab === 'keys' }" @click="tab = 'keys'">快捷键</button>
-    <button class="tab" :class="{ on: tab === 'cats' }" @click="tab = 'cats'">分类与标签</button>
+    <button class="tab" :class="{ on: tab === 'cats' }" @click="tab = 'cats'">分类</button>
+    <button class="tab" :class="{ on: tab === 'tags' }" @click="tab = 'tags'">标签管理</button>
     <button class="tab" :class="{ on: tab === 'persona' }" @click="tab = 'persona'">AI 助手</button>
   </div>
 
@@ -301,49 +430,118 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
       书册 {{ stats.books }} 个 · 题目 {{ stats.questions }} 道（已确认 {{ stats.confirmed_questions }}、
       草稿 {{ stats.draft_questions }}）· 试卷 {{ stats.papers }} 张
     </p>
+    <h3>存储清理</h3>
+    <p class="muted" style="margin:4px 0 10px">
+      清掉没被任何题目引用的裁剪图片、7 天前的导入临时 PDF 与导出的标注版 PDF。先点「扫描」看看能省多少。
+    </p>
+    <div class="rownow">
+      <button class="ghost" @click="scanClean">扫描</button>
+      <button class="primary" :disabled="cleaning || !clean || !clean.total_bytes" @click="doClean">
+        {{ cleaning ? '清理中…' : '立即清理' }}
+      </button>
+      <span v-if="clean" class="muted" style="font-size:12.5px">
+        废弃图片 {{ clean.orphan_images.count }} 个（{{ fmtBytes(clean.orphan_images.bytes) }}）·
+        旧临时 PDF {{ clean.old_uploads.count }} 个（{{ fmtBytes(clean.old_uploads.bytes) }}）·
+        旧导出 {{ clean.old_exports.count }} 个（{{ fmtBytes(clean.old_exports.bytes) }}）
+        <b v-if="clean.total_bytes"> · 可省 {{ fmtBytes(clean.total_bytes) }}</b>
+        <b v-else> · 没有可清理的</b>
+      </span>
+    </div>
+    <p v-if="cleanMsg" class="okbox" style="margin-top:10px">{{ cleanMsg }}</p>
+
+    <h3>公共题库（GitHub 同步）</h3>
+    <p class="muted" style="margin:4px 0 10px">
+      题目发布到一个公开的 GitHub 仓库，别人点「一键更新」就能把新题同步到自己的题库。
+      <b>只有在这台电脑上</b>（且令牌属于仓库主人）才能发布；更新任何人都能做。
+    </p>
+    <div v-if="gh" class="storebox">
+      <div class="rownow">
+        <span class="lbl">仓库</span>
+        <input v-model="ghOwner" class="pathinput" style="max-width:170px" placeholder="GitHub 用户名" />
+        <span class="muted">/</span>
+        <input v-model="ghRepo" class="pathinput" style="max-width:200px" placeholder="仓库名" />
+        <select v-model="ghMirror" style="margin-left:6px; max-width:300px">
+          <option value="jsdelivr">下载源：jsDelivr（国内较快）</option>
+          <option value="raw">下载源：raw.githubusercontent</option>
+          <option value="ghproxy">下载源：ghproxy 镜像</option>
+        </select>
+        <button class="ghost" :disabled="!!ghBusy" @click="ghSaveCfg">{{ ghBusy === 'cfg' ? '保存中…' : '保存' }}</button>
+      </div>
+      <div class="rownow" style="margin-top:8px; flex-wrap:wrap; gap:8px">
+        <span class="chip" :class="gh.token.present ? 'brand' : ''">
+          令牌：{{ gh.token.present ? (gh.token.login || gh.token.source) : '未配置' }}
+        </span>
+        <span v-if="gh.token.present && gh.token.valid === false" class="chip" style="color:#b91c1c">令牌无效</span>
+        <span class="chip" :title="gh.remote && gh.remote.reachable ? '刚从 GitHub 读到的' : '这次没连上，显示上次读到的'">
+          远端第 {{ gh.remote ? gh.remote.seq : '—' }} 包<span v-if="gh.remote && !gh.remote.reachable">（上次）</span>
+        </span>
+        <span class="chip">本地第 {{ gh.last.seq }} 包</span>
+        <span v-if="gh.last.publish_at" class="chip">上次发布 {{ gh.last.publish_at.replace('T', ' ').replace('Z', '') }}</span>
+        <span v-if="gh.last.pull_at" class="chip">上次更新 {{ gh.last.pull_at.replace('T', ' ').replace('Z', '') }}</span>
+        <a :href="gh.url" target="_blank" rel="noreferrer" class="muted" style="font-size:12.5px">打开仓库 ↗</a>
+      </div>
+      <p v-if="gh.remote && !gh.remote.reachable" class="warnbox" style="margin:8px 0 0">
+        这次没连上远端仓库，上面显示的是上次读到的值：{{ gh.remote.error }}
+      </p>
+
+      <div class="rownow" style="margin-top:10px">
+        <span class="lbl">令牌</span>
+        <input v-model="ghTok" type="password" class="pathinput" style="flex:1"
+               placeholder="粘贴 GitHub Personal Access Token（只存在本机，DPAPI 加密）" />
+        <button class="ghost" :disabled="!!ghBusy" @click="ghSaveToken">{{ ghBusy === 'token' ? '保存中…' : '保存令牌' }}</button>
+        <button v-if="gh.token.present" class="ghost" :disabled="!!ghBusy" @click="ghClearToken">删除</button>
+      </div>
+      <p class="muted" style="margin:6px 0 0; font-size:12.5px">
+        生成地址：github.com/settings/tokens → Fine-grained token，只勾选这一个仓库的
+        <b>Contents: Read and write</b>。换电脑要重新粘一次。
+      </p>
+
+      <div class="rownow" style="margin-top:10px; flex-wrap:wrap; gap:10px">
+        <label class="muted" style="font-size:12.5px; display:flex; align-items:center; gap:4px">
+          <input v-model="ghDrafts" type="checkbox" /> 连草稿一起发布（{{ gh.local.drafts }} 道）
+        </label>
+        <button class="primary" :disabled="!!ghBusy || !gh.token.present"
+                :title="gh.token.present ? '' : '先配置令牌'"
+                @click="ghPublish">
+          {{ ghBusy === 'publish' ? '发布中…' : `立即发布（${ghDrafts ? gh.local.confirmed + gh.local.drafts : gh.local.confirmed} 题）` }}
+        </button>
+        <button class="ghost" :disabled="!!ghBusy" @click="ghPull">{{ ghBusy === 'pull' ? '更新中…' : '一键更新题库' }}</button>
+        <button class="ghost" :disabled="!!ghBusy" @click="loadGh">刷新状态</button>
+      </div>
+      <p v-if="ghMsg" class="okbox" style="margin-top:10px">{{ ghMsg }}</p>
+      <p v-if="ghErr" class="warnbox" style="margin-top:10px">{{ ghErr }}</p>
+    </div>
+
     <h3>服务</h3>
     <p class="muted" style="margin:4px 0">
-      本机启动用项目里的 <code>start.bat</code>；登录 Windows 后计划任务 <code>tiku-studio</code> 会自动拉起。
+      本机启动用项目里的 <code>start.bat</code>；登录 Windows 后计划任务 <code>tiku-studio</code>（服务内部名，未改）会自动拉起。
       打不开时先看 <code>data/server.log</code> 末尾几行。
     </p>
   </div>
 
   <!-- AI 模型 -->
   <div v-else-if="tab === 'ai'" class="card">
+    <div class="embcard">
+      <div class="embhead">
+        <b>内置免费模型</b>
+        <span class="tag" :class="emb.ok ? 'ok' : 'bad'">{{ emb.ok ? '运行中' : '未运行' }}</span>
+        <span class="muted">{{ emb.ok ? '随应用启动，不需要 DSH / 任何后台程序' : emb.note }}</span>
+      </div>
+      <div class="embrow">
+        <select v-model="emb.model" :disabled="!emb.models.length">
+          <option v-if="!emb.models.length" value="">（还没有可用模型）</option>
+          <option v-for="m in emb.models" :key="m" :value="m">{{ m }}</option>
+        </select>
+        <button class="btn" :disabled="embBusy" @click="startEmbedded">重启内置服务</button>
+        <button class="btn primary" :disabled="embBusy || !emb.ok" @click="useEmbedded">用它当默认模型</button>
+        <span v-if="embMsg" class="embmsg">{{ embMsg }}</span>
+      </div>
+      <div class="embnote">内置服务是本机自带的一份独立免费模型代理（Node 进程，端口 18903），装好即用、无需登录；网页管理入口见 data/ofm.log。</div>
+    </div>
     <AiQuota />
     <h3>AI 模型</h3>
     <div v-if="aiInfo.env_override" class="warnbox" style="margin-bottom:10px">
       检测到环境变量 <code>DEEPSEEK_API_KEY</code>，它的优先级高于这里保存的 Key。
-    </div>
-    <div style="margin:10px 0 14px; padding:12px; border:1px solid var(--line); border-radius:10px">
-      <div class="rownow">
-        <span class="lbl">本机免费模型</span>
-        <button :disabled="free.busy" @click="detectFree">{{ free.busy ? '检测中…' : '检测免费模型插件' }}</button>
-        <span v-if="aiInfo.free_gateway" class="chip ok">正在使用</span>
-        <span v-else-if="aiInfo.free_enabled" class="chip">已启用（网关未就绪）</span>
-        <button v-if="aiInfo.free_enabled" class="ghost" :disabled="aiBusy" @click="restorePaid">切回付费 Key</button>
-      </div>
-      <p style="margin:8px 0 0; color:var(--bad); font-weight:700; line-height:1.65; font-size:13px">
-        ⚠ 免费模型必须安装 DeepSeek Harness（并装好免费模型插件），且让 DSH 在后台运行才可用。
-        DSH 关掉后，免费模型会连接失败，翻译 / 逐页精读 / 生成答案 / 归类解析都用不了。
-      </p>
-      <p class="muted" style="margin:6px 0 0; font-size:12.5px">
-        如果你装了 DeepSeek Harness 的免费模型插件，点「检测」后选一个模型即可，不用填 API Key。
-        免费额度由插件提供。
-      </p>
-      <div v-if="free.ok" class="rownow" style="margin-top:8px">
-        <span class="lbl">选择模型</span>
-        <select v-model="free.picked" class="pathinput">
-          <option v-for="m in free.models" :key="m" :value="m">{{ m }}</option>
-        </select>
-        <button class="primary" :disabled="aiBusy" @click="useFree">使用免费模型</button>
-      </div>
-      <p style="margin:8px 0 0; font-size:12.5px; color:var(--muted)">
-        网关 <code>{{ aiInfo.gateway_url || 'http://127.0.0.1:8326/v1' }}</code>
-        <span v-if="aiInfo.gateway_key_found"> · 已找到本机网关密钥</span>
-        <span v-else> · 未找到本机网关密钥</span>
-      </p>
-      <p v-if="free.error" class="warnbox" style="margin:8px 0 0">{{ free.error }}</p>
     </div>
     <div class="rownow">
       <span class="lbl">当前 Key</span>
@@ -391,7 +589,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
     <p class="muted" style="margin:10px 0 0; font-size:12.5px">
       Key 申请地址 <code>platform.deepseek.com</code>；保存后无需重启服务，出题页马上可用。
       若报 401，多半是 Key 复制不完整；报 402 是账户余额不足。
-      在这里保存会切回付费 DeepSeek（免费通道的设置会保留，随时可以再点「使用免费模型」）。
+      在这里保存会切回付费 Key。想用内置免费模型，点上方的「用它当默认模型」即可，随时可以切回来。
     </p>
     <p v-if="aiErr" class="errbox" style="margin-top:10px">{{ aiErr }}</p>
     <p v-if="aiMsg" class="okbox" style="margin-top:10px">{{ aiMsg }}</p>
@@ -409,25 +607,47 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
         <button class="ghost sm" @click="helpOpen = false">关闭</button>
       </div>
       <div class="helpbody">
-        <h4>它能做什么</h4>
+        <h4>三种用法，按需选一个</h4>
         <ul>
-          <li>出题页「选中英文 → 翻译成中文」「AI 逐页精读（摘要 + 机理/重点）」</li>
-          <li>「AI 生成答案」、保存时的题型归类、<code>AI 生成解析</code></li>
-          <li>精读页逐句译文、智能出题（按级别/知识点/题型命题）、批量拆题的答案补全</li>
+          <li><b>内置免费模型（推荐，零配置）</b>：应用自带一份免费模型代理，随应用启动，不用装别的东西、不用填 Key。</li>
+          <li><b>自己的 API Key</b>：智谱 GLM-4-Flash、百炼 qwen-flash、DeepSeek 都行，填 Key + Base URL + 模型名。</li>
+          <li><b>两者都配</b>：平时用内置免费模型，等免费额度用完再点「保存」切付费 Key（内置设置会保留）。</li>
         </ul>
-        <h4>Key 存在哪</h4>
-        <p>只保存在本机 <code>data/tiku.db</code>，不上传；也可以用环境变量 <code>DEEPSEEK_API_KEY</code>（优先级更高）。</p>
-        <h4>免费模型 vs 付费 Key</h4>
-        <p>「本机免费模型」走 DeepSeek Harness 网关，需要 DSH 在后台运行；DSH 关掉后免费通道会失败（翻译、精读、生成答案都会失败）。点「检测免费模型插件」可以挑一个模型，不用填 Key。</p>
-        <p>免费推理模型会把预算花在思考上：命题类调用把 <code>max_tokens</code> 提到 12000~16000 才稳定出结果，单次 40~100 秒属正常。</p>
+
+        <h4>内置免费模型怎么用</h4>
+        <p>顶部「内置免费模型」卡片会显示状态。首次进入应用时它会在后台自动启动（约 10~30 秒），状态变「运行中」即可用。</p>
+        <ul>
+          <li>下拉里挑一个模型 → 点「用它当默认模型」，AI 功能立即生效；</li>
+          <li>换模型或服务卡住时，点「重启内置服务」；</li>
+          <li>它不是无限额度：走的是上游免费通道，偶发 429/超时属正常，重试即可。</li>
+        </ul>
+
+        <h4>它具体用在哪些地方</h4>
+        <ul>
+          <li>出题页：「选中英文→翻译」、AI 生成答案、AI 生成解析、保存时题型归类</li>
+          <li>精读页：逐句译文、重点句解释</li>
+          <li>智能出题：按级别/知识点/题型命题；批量拆题：补全缺失答案</li>
+        </ul>
+
+        <h4>Key 存哪</h4>
+        <p>只写在本机 <code>data/tiku.db</code>，不上传、不联网校验。也可以用环境变量 <code>DEEPSEEK_API_KEY</code>（优先级更高，界面上会显示「来自环境变量」）。</p>
+
         <h4>额度怎么看</h4>
-        <p>顶部「免费模型用量」按本机实测统计（今日/累计调用、失败数、输出 tokens、首字延迟）；官方没有上限接口，所以这是观测值不是配额。付费余额来自本机快照。</p>
+        <p>顶部「免费模型用量」是按本机实际调用统计的观测值（今日/累计调用、失败数、输出 tokens、首字延迟），官方没有上限接口，所以它不是剩余额度。下方「官方账户余额」来自本机快照，仅对填了付费 Key 的账号有意义。</p>
+
+        <h4>速度与稳定性</h4>
+        <ul>
+          <li>免费推理模型会先「思考」再出字：单次问了 40~100 秒是正常的，命题类调用已把 <code>max_tokens</code> 提到 12000~16000 才稳定；</li>
+          <li>批量任务（如一次出 3 题）耗时会叠加，建议一次 1~2 题；</li>
+          <li>开着代理/VPN 时偶尔连不上上游，关掉重试。</li>
+        </ul>
+
         <h4>常见报错</h4>
         <ul>
-          <li>401：Key 复制不完整</li>
-          <li>402：账户余额不足</li>
-          <li>502（AI 没有返回可用的题目）：素材太长/输出被截断，调小数量或换更短的素材</li>
-          <li>连接失败：DSH 没开，或网关 8326 端口不通</li>
+          <li><b>401</b>：Key 复制不完整（常见于复制时少了尾部字符）</li>
+          <li><b>402</b>：账户余额不足</li>
+          <li><b>502 / AI 没有返回可用的题目</b>：素材太长或输出被截断，调小数量、换短一点的素材</li>
+          <li><b>内置服务「未启动」</b>：点「重启内置服务」；仍不行就看 <code>data/ofm.log</code> 末尾几行</li>
         </ul>
       </div>
     </div>
@@ -439,7 +659,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
       分类维度自己定；标签就是分类里的取值，题库左栏、筛选、组卷都按这里的设置走。
     </p>
     <CategoryAdmin />
-    <h3 style="margin-top:22px">标签库</h3>
+  </div>
+
+  <div v-else-if="tab === 'tags'" class="card">
+    <h3>标签管理</h3>
+    <p class="muted" style="margin:4px 0 12px">题库左栏、筛选、组卷都按这里的标签走；默认按「专题」分组，也可以自建分组。</p>
     <TagsAdmin embedded />
   </div>
 
@@ -502,11 +726,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
     </div>
   </div>
 
-  <!-- 标签管理 -->
-  <div v-else>
-    <TagsAdmin embedded />
-  </div>
-
   <div v-if="err" class="errbox" style="margin-top:12px">{{ err }}</div>
 </template>
 
@@ -547,4 +766,13 @@ kbd {
   font-size: 12.5px; color: #1f2937;
 }
 kbd.cap { border-color: var(--brand); background: var(--brand-soft); color: var(--brand); }
+.embcard { border: 1px solid #dbe6ff; background: #f6f9ff; border-radius: 12px; padding: 12px 14px; margin-bottom: 14px; }
+.embhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.embhead .tag { font-size: 12px; padding: 1px 8px; border-radius: 999px; }
+.embhead .tag.ok { background: #e7f7ec; color: #1f7a3f; }
+.embhead .tag.bad { background: #fdecec; color: #b42318; }
+.embrow { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.embrow select { min-width: 280px; }
+.embmsg { color: #2f6fed; font-size: 13px; }
+.embnote { color: #667085; font-size: 12px; margin-top: 8px; line-height: 1.6; }
 </style>

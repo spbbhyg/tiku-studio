@@ -2,7 +2,6 @@
 import { nextTick, onMounted, ref } from 'vue'
 import { api } from '../api.js'
 
-const stats = ref(null)
 const papers = ref([])
 const err = ref('')
 
@@ -141,7 +140,6 @@ function clearChat() {
 onMounted(async () => {
   loadPersona()
   try {
-    stats.value = await api.get('/api/stats')
     papers.value = (await api.get('/api/papers')).slice(0, 5)
   } catch (e) { err.value = String(e.message || e) }
 })
@@ -150,6 +148,15 @@ onMounted(async () => {
 <template>
   <h2>首页</h2>
   <div v-if="err" class="errbox">{{ err }}</div>
+
+  <!-- 封面 -->
+  <div class="cover">
+    <div class="covertext">
+      <div class="covertitle">神奋</div>
+      <div class="coversub">题库 · 对纲 · 组卷 · 整卷导出</div>
+    </div>
+    <img class="coverart" src="/cover-circle.png" alt="神奋" />
+  </div>
 
   <div class="card aichat">
     <div class="chathead">
@@ -162,10 +169,6 @@ onMounted(async () => {
       </div>
       <button class="ghost" :disabled="chatBusy" @click="clearChat">清空</button>
     </div>
-    <p class="muted chatintro">
-      {{ persona.name }}：{{ persona.tone }}。可以问本站功能、操作步骤和按钮位置，也可以问化学、写作、编程等通用问题。
-      回答由「设置 → AI 模型」里当前的模型提供，默认逐字输出；需要最新信息时打开下面的「联网搜索」。
-    </p>
     <div class="sugs">
       <button v-for="s in SUGGESTIONS" :key="s" class="chip sug" :disabled="chatBusy" @click="sendChat(s)">
         {{ s }}
@@ -176,7 +179,6 @@ onMounted(async () => {
         <input v-model="searchOn" type="checkbox" :disabled="chatBusy" />
         联网搜索
       </label>
-      <span class="muted">开启后先搜 Bing 网页再回答，并在回答下方附来源；搜索失败时会明确说明。</span>
     </div>
     <div ref="chatLog" class="chatlog">
       <div v-for="(m, i) in chat" :key="i" class="msg" :class="m.role">
@@ -203,41 +205,37 @@ onMounted(async () => {
       </button>
     </div>
     <p v-if="chatErr" class="errbox" style="margin-top:10px">{{ chatErr }}</p>
-    <p class="muted chatnote">
-      支持多轮对话和逐字输出；对话过长时点「清空」开新对话即可。
-      联网搜索来自 Bing，结果可能不完整或过期，引用链接请自行核对。
-      用本机免费模型时，需要 DeepSeek Harness 和免费模型插件在后台运行；DSH 关掉后这里会连接失败。
-    </p>
   </div>
 
-  <template v-if="stats">
-    <div class="grid cols4">
-      <div class="card stat"><div class="num">{{ stats.books }}</div><div class="label">书册（含 {{ stats.textbooks }} 本课本纲）</div></div>
-      <div class="card stat"><div class="num">{{ stats.questions }}</div><div class="label">题目（已确认 {{ stats.confirmed_questions }}）</div></div>
-      <div class="card stat"><div class="num">{{ stats.draft_questions }}</div><div class="label">草稿题目</div></div>
-      <div class="card stat"><div class="num">{{ stats.suspect_questions }}</div><div class="label">疑似超纲（对纲校验）</div></div>
-    </div>
-    <div class="card">
-      <h3>科目分布</h3>
-      <span v-for="(n, s) in stats.by_subject" :key="s" class="chip brand">{{ s }}：{{ n }} 题</span>
-      <h3>题型分布</h3>
-      <span v-for="(n, t) in stats.by_type" :key="t" class="chip">{{ t }} {{ n }}</span>
-    </div>
-    <div class="card">
-      <h3>最近试卷</h3>
-      <p v-if="!papers.length" class="muted">还没有试卷，去<a href="#/questions"> 题库 </a>选题组卷生成第一份。</p>
-      <table v-else class="table">
-        <tr><th>标题</th><th>题数</th><th>总分</th><th>限时</th></tr>
-        <tr v-for="p in papers" :key="p.id">
-          <td><router-link :to="`/papers/${p.id}`">{{ p.title }}</router-link></td>
-          <td>{{ p.question_count }}</td><td>{{ p.total_score }}</td><td>{{ p.duration_minutes }} 分钟</td>
-        </tr>
-      </table>
-    </div>
-  </template>
+  <div class="card">
+    <h3>最近试卷</h3>
+    <p v-if="!papers.length" class="muted">还没有试卷，去<a href="#/questions"> 题库 </a>选题组卷生成第一份。</p>
+    <table v-else class="table">
+      <tr><th>标题</th><th>题数</th><th>总分</th><th>限时</th></tr>
+      <tr v-for="p in papers" :key="p.id">
+        <td><router-link :to="`/papers/${p.id}`">{{ p.title }}</router-link></td>
+        <td>{{ p.question_count }}</td><td>{{ p.total_score }}</td><td>{{ p.duration_minutes }} 分钟</td>
+      </tr>
+    </table>
+  </div>
 </template>
 
 <style scoped>
+.cover {
+  position: relative; margin: 12px 0 16px; border-radius: 16px; overflow: hidden;
+  border: 1px solid #2a2438; box-shadow: 0 10px 30px rgba(12, 10, 24, .18);
+  display: flex; align-items: center; justify-content: space-between; gap: 20px;
+  padding: 18px 26px; min-height: 150px;
+  background: linear-gradient(115deg, #1b1630 0%, #241c3a 45%, #3a2a4e 100%);
+}
+.covertext { min-width: 0; }
+.coverart {
+  width: 132px; height: 132px; border-radius: 50%; object-fit: contain; flex: none;
+  filter: drop-shadow(0 10px 24px rgba(0, 0, 0, .45));
+}
+.covertitle { color: #fff; font-size: 26px; font-weight: 800; letter-spacing: 2px; text-shadow: 0 2px 10px rgba(0,0,0,.35); }
+.coversub { color: rgba(255,255,255,.9); font-size: 12.5px; letter-spacing: 1px; }
+
 .aichat { margin-bottom: 14px; }
 .chathead { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .persona { display: flex; align-items: center; gap: 10px; min-width: 0; }

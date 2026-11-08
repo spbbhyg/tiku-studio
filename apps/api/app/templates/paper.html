@@ -1,0 +1,112 @@
+{#
+  paper.html —— paperdoc/v2 的渲染模板
+
+  结构与样式分离：结构全在这里，尺寸全在 paper.css。
+  渲染器（app/services/paperdoc/render.py）只做三件事：
+    1. 把 doc 里的块归一化成模板要的形状（补默认值、解析图片路径、算每列颜色）；
+    2. 生成 @page 规则（页眉文字 + 页脚「第 X 页 共 Y 页」）；
+    3. 交给 Playwright 打印。
+
+  编号（第 N 题、1-1）一律由模板生成，数据里不许写（§1.1 第 4 条）。
+#}
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>{{ doc.meta.title }}</title>
+{# paper.css 直接内联：Paged.js 用 XHR 读样式表，file:// 下会被 CORS 拦掉。 #}
+<style>{{ css_text|safe }}</style>
+<style>{{ page_rule|safe }}</style>
+</head>
+<body class="part-{{ part }}">
+
+{# ---------------------------------------------------------------- 块宏 #}
+
+{% macro m_para(b) -%}
+<p class="para para--{{ b.style }}{% if not b.indent %} no-indent{% endif %}">{{ b.text|inline }}</p>
+{%- endmacro %}
+
+{% macro m_heading(b) -%}
+<h3 class="heading">{{ b.text|inline }}</h3>
+{%- endmacro %}
+
+{% macro m_figure(b) -%}
+<div class="figure figure--{{ b.align }}">
+  {%- if b.missing %}
+  <div class="figure-missing">缺图：{{ b.path }}</div>
+  {%- else %}
+  <img src="{{ b.src }}" style="width: {{ b.w }}pt{% if b.h %}; height: {{ b.h }}pt{% endif %}" alt="">
+  {%- endif %}
+  {%- if b.caption %}
+  <p class="figure-caption">{{ b.caption|inline }}</p>
+  {%- endif %}
+</div>
+{%- endmacro %}
+
+{% macro m_table(b) -%}
+<table class="table">
+  <thead>
+    <tr>{% for c in b.head %}<th>{{ c|inline }}</th>{% endfor %}</tr>
+  </thead>
+  <tbody>
+    {%- for row in b.rows %}
+    <tr>{% for c in row %}<td class="cell--{{ b.col_styles[loop.index0] }}">{{ c|inline }}</td>{% endfor %}</tr>
+    {%- endfor %}
+  </tbody>
+</table>
+{%- if b.caption %}
+<p class="table-caption">{{ b.caption|inline }}</p>
+{%- endif %}
+{%- endmacro %}
+
+{% macro m_sub(b) -%}
+<p class="sub"><span class="sub-no">{{ b.no }}</span> {{ b.text|inline }}</p>
+{%- endmacro %}
+
+{% macro m_pagebreak(b) -%}
+<div class="pagebreak"></div>
+{%- endmacro %}
+
+{% macro m_ansblock(b) -%}
+<div class="ansblock">
+  {%- if b.label %}
+  <p class="ansblock-label">{{ b.for }}（{{ b.label }}）</p>
+  {%- endif %}
+  {%- for sub in b.blocks %}{{ block(sub) }}{% endfor %}
+</div>
+{%- endmacro %}
+
+{% macro block(b) -%}
+{%- if b.t == "para" %}{{ m_para(b) }}
+{%- elif b.t == "heading" %}{{ m_heading(b) }}
+{%- elif b.t == "figure" %}{{ m_figure(b) }}
+{%- elif b.t == "table" %}{{ m_table(b) }}
+{%- elif b.t == "sub" %}{{ m_sub(b) }}
+{%- elif b.t == "pagebreak" %}{{ m_pagebreak(b) }}
+{%- elif b.t == "ansblock" %}{{ m_ansblock(b) }}
+{%- endif %}
+{%- endmacro %}
+
+{# ---------------------------------------------------------------- 正文 #}
+
+<main class="paper">
+
+{% if doc.front %}
+<section class="front">
+  {%- for b in doc.front %}{{ block(b) }}{% endfor %}
+</section>
+{% endif %}
+
+{% for item in items %}
+<section class="item{% if item.tall %} item--tall{% endif %}">
+  <h2 class="item-title"><span class="item-no">第 {{ item.number }} 题</span> {% if item.title %}<span class="item-name">{{ item.title }}</span> {% endif %}{% if item.score %}<span class="item-score">({{ item.score|num }} 分{% if item.percent %}，{{ item.percent|num }}%{% endif %})</span>{% endif %}</h2>
+  {%- for b in item.blocks %}{{ block(b) }}{% endfor %}
+</section>
+{% endfor %}
+
+</main>
+
+<script>window.PagedConfig = { auto: false };</script>
+<script src="{{ paged_url }}"></script>
+</body>
+</html>

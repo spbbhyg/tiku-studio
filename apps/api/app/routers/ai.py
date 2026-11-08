@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -9,7 +12,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..db import SessionLocal, get_db
-from ..services import ai, site_guide
+from ..services import ai, ofm as ofm_svc, site_guide
 
 router = APIRouter(prefix="/api/ai", tags=["ai"])
 
@@ -142,6 +145,103 @@ def site_chat_stream(body: ChatIn):
     )
 
 
+_BRIEF_JOBS: dict[str, dict] = {}
+_BRIEF_LOCK = threading.Lock()
+
+
+@router.post("/doc-brief/jobs")
+def start_doc_brief_job(body: DocBriefIn) -> dict:
+    """后台文献解读：切页面不中断，回来继续取结果。"""
+    source = (body.source or "").strip()
+    if not source and not body.doc_id:
+        raise HTTPException(400, "请选择一份 PDF，或粘贴文献文字")
+    jid = uuid.uuid4().hex[:16]
+    with _BRIEF_LOCK:
+        _BRIEF_JOBS[jid] = {"status": "running", "created": time.time(), "result": None, "error": ""}
+
+    def run() -> None:
+        db = SessionLocal()
+        try:
+            text = source
+            if not text and body.doc_id:
+                text = ai.pdf_to_text(ai._doc_file(body.doc_id))
+            res = ai.document_brief(db, text, body.count, level=body.level, focus=body.focus)
+            with _BRIEF_LOCK:
+                job = _BRIEF_JOBS.get(jid)
+                if job is not None:
+                    job.update({"status": "done", "result": res})
+        except Exception as exc:  # noqa: BLE001
+            detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            with _BRIEF_LOCK:
+                job = _BRIEF_JOBS.get(jid)
+                if job is not None:
+                    job.update({"status": "error", "error": detail or "文献解读失败"})
+        finally:
+            db.close()
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"ok": True, "job_id": jid}
+
+
+@router.get("/doc-brief/jobs/{job_id}")
+def get_doc_brief_job(job_id: str) -> dict:
+    with _BRIEF_LOCK:
+        job = dict(_BRIEF_JOBS.get(job_id) or {})
+    if not job:
+        raise HTTPException(404, "任务不存在或已过期")
+    return {"job_id": job_id, "status": job["status"],
+            "result": job.get("result"), "error": job.get("error") or ""}
+
+
+_SQ_JOBS: dict[str, dict] = {}
+_SQ_LOCK = threading.Lock()
+
+
+@router.post("/smart-questions/jobs")
+def start_smart_questions_job(body: SmartQuestionsIn) -> dict:
+    """后台按文献/素材出题：切页面不中断，回来继续取结果。"""
+    source = (body.source or "").strip()
+    if not source and not body.doc_id:
+        raise HTTPException(400, "请选择一份 PDF，或粘贴文献文字")
+    jid = uuid.uuid4().hex[:16]
+    with _SQ_LOCK:
+        _SQ_JOBS[jid] = {"status": "running", "created": time.time(), "result": None, "error": ""}
+
+    def run() -> None:
+        db = SessionLocal()
+        try:
+            text = source
+            if not text and body.doc_id:
+                text = ai.pdf_to_text(ai._doc_file(body.doc_id))
+            res = ai.generate_questions(db, text, body.count, q_type="综合",
+                                        difficulty=body.difficulty or 0)
+            with _SQ_LOCK:
+                job = _SQ_JOBS.get(jid)
+                if job is not None:
+                    job.update({"status": "done", "result": res})
+        except Exception as exc:  # noqa: BLE001
+            detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            with _SQ_LOCK:
+                job = _SQ_JOBS.get(jid)
+                if job is not None:
+                    job.update({"status": "error", "error": detail or "出题失败"})
+        finally:
+            db.close()
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"ok": True, "job_id": jid}
+
+
+@router.get("/smart-questions/jobs/{job_id}")
+def get_smart_questions_job(job_id: str) -> dict:
+    with _SQ_LOCK:
+        job = dict(_SQ_JOBS.get(job_id) or {})
+    if not job:
+        raise HTTPException(404, "任务不存在或已过期")
+    return {"job_id": job_id, "status": job["status"],
+            "result": job.get("result"), "error": job.get("error") or ""}
+
+
 @router.post("/translate")
 def translate(body: TranslateIn, db: Session = Depends(get_db)):
     return ai.translate(db, body.text, body.target)
@@ -203,3 +303,35 @@ def doc_brief(body: DocBriefIn, db: Session = Depends(get_db)):
         raise
     except Exception as exc:                                 # noqa: BLE001
         raise HTTPException(502, f"文献解读失败：{exc}") from exc
+
+
+class EmbeddedIn(BaseModel):
+    model: str = ""
+
+
+@router.get("/embedded")
+def embedded_status() -> dict:
+    """内置免费模型服务（随应用启动，不依赖 DSH）的状态。"""
+    st = ofm_svc.status()
+    if st.get("running"):
+        return {"ok": True, "base_url": st["base_url"], "models": st["models"],
+                "model": ofm_svc.pick_model(st["models"]), "note": "内置服务在运行"}
+    return {"ok": False, "note": st.get("error") or "内置服务未启动",
+            "entry": str(ofm_svc.OFM_ENTRY), "data_dir": str(ofm_svc.OFM_DATA)}
+
+
+@router.post("/embedded/start")
+def embedded_start() -> dict:
+    st = ofm_svc.ensure_running()
+    return {"ok": bool(st.get("ok")), "models": st.get("models", []), "error": st.get("error", "")}
+
+
+@router.post("/embedded/use")
+def embedded_use(body: EmbeddedIn, db: Session = Depends(get_db)) -> dict:
+    """把 AI 通道切到内置服务（写进同一份配置，界面与其它接口无需改）。"""
+    st = ofm_svc.ensure_running()
+    if not st.get("ok"):
+        raise HTTPException(502, f"内置免费模型没起来：{st.get('error') or '未知原因'}")
+    model = (body.model or "").strip() or ofm_svc.pick_model(st.get("models", []))
+    cfg = ai.save_config(db, base_url=st["base_url"], model=model, api_key=st["key"])
+    return {"ok": True, "config": cfg, "model": model, "base_url": st["base_url"]}

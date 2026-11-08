@@ -14,6 +14,7 @@ import importlib.util
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import fitz
@@ -703,8 +704,14 @@ def generate_answer(db: Session, stem: str, q_type: str = "", answer_hint: str =
     content, usage = _chat(db, [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
-    ], temperature=0.1, max_tokens=3000, json_mode=True)
-    payload = _answer_payload(content)
+    ], temperature=0.1, max_tokens=16000, json_mode=True)
+    payload = _answer_payload(_repair_json(content) or content if content else content)
+    if not payload.get("answer"):          # 推理型模型可能把预算全花在思考上，压篇幅再要一次
+        content, usage = _chat(db, [
+            {"role": "system", "content": "直接给出答案 JSON，不要推理过程：{\"answer\":\"…\",\"analysis\":\"…\",\"references\":[]}"},
+            {"role": "user", "content": user + chr(10) + chr(10) + "要求：answer 控制在 800 字内。"},
+        ], temperature=0.1, max_tokens=16000, json_mode=True, timeout=240.0)
+        payload = _answer_payload(_repair_json(content) or content if content else content)
 
     if verify and payload.get("answer"):
         check_system = (
@@ -719,7 +726,7 @@ def generate_answer(db: Session, stem: str, q_type: str = "", answer_hint: str =
             fixed, usage2 = _chat(db, [
                 {"role": "system", "content": check_system},
                 {"role": "user", "content": f"题干：\n{text}\n\n待复核答案：\n{draft}"},
-            ], temperature=0.0, max_tokens=3000, json_mode=True)
+            ], temperature=0.0, max_tokens=16000, json_mode=True)
             checked = _answer_payload(fixed)
             if checked.get("answer"):
                 payload = checked
@@ -743,13 +750,60 @@ def generate_answer(db: Session, stem: str, q_type: str = "", answer_hint: str =
 
 
 # ---------------------------------------------------------------- 整卷生成 / 试卷导入
+
+def _json_ok(text: str) -> bool:
+    try:
+        json.loads(text)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _repair_json(text: str):
+    """从可能被截断/带围栏的回复里抠出能解析的 JSON；救不回来返回 None。"""
+    t = (text or "").strip()
+    if not t:
+        return None
+    t = re.sub(r"^```(?:json)?", "", t).replace("```", "").strip()
+    if _json_ok(t):
+        return t
+    start = t.find("{")
+    if start < 0:
+        start = t.find("[")
+    if start < 0:
+        return None
+    body = t[start:]
+    for cut in range(len(body), max(len(body) - 4000, 0), -1):
+        frag = body[:cut]
+        for tail in ("", "]}", "}", "}]}", "}]}"):
+            if _json_ok(frag + tail):
+                return frag + tail
+    return None
+
+
 def _questions_payload(content: str) -> list[dict]:
     """解析模型返回的 {"questions": [...]}，清洗成快照字段。"""
     try:
         data = _json_from_text(content)
     except HTTPException:
         data = None
-    raw = data.get("questions") if isinstance(data, dict) else (data if isinstance(data, list) else [])
+    if data is None:
+        try:
+            fixed = _repair_json(content)
+            data = _json_from_text(fixed) if fixed else None
+        except HTTPException:
+            data = None
+    if isinstance(data, dict):
+        raw = data.get("questions")
+        if raw is None:
+            raw = data.get("items")
+        if raw is None and data and all(isinstance(v, dict) for v in data.values()):
+            raw = list(data.values())
+        raw = raw or []
+    elif isinstance(data, list):
+        raw = data
+    else:
+        raw = []
     out: list[dict] = []
     for q in raw or []:
         if not isinstance(q, dict):
@@ -775,149 +829,70 @@ def _questions_payload(content: str) -> list[dict]:
     return out
 
 
+def _gen_one(db: Session, text: str, q_type: str, difficulty: int, idx: int, total: int) -> dict | None:
+    """命制 1 道题（单次调用，篇幅约束写死，避免被 token 上限截断）。"""
+    system = (
+        "你是一名化学奥林匹克竞赛命题专家。只输出一个 JSON 对象，不要解释、不要推理过程。"
+    )
+    user = (
+        "以给定素材为主题，命制 1 道完整试题。\n"
+        "格式：{\"questions\": [{\"q_type\": \"综合\", \"stem\": \"题干（含小问，编号 1-1、1-2…）\", "
+        "\"answer\": \"参考答案\", \"analysis\": \"解析\", \"knowledge_points\": [\"专题\"], \"score\": 10}]}\n"
+        "要求：\n"
+        "1. 题干不超过 320 字，必须自洽（给足数据/条件）。\n"
+        "2. 参考答案不超过 200 字，解析不超过 150 字，不要重复题干。\n"
+        "3. knowledge_points 只能从以下专题中选 1-2 个：" + "、".join(CHEM_TOPICS) + "。\n"
+        "4. score 为 8-20 的整数。\n"
+        f"5. 这是第 {idx + 1}/{total} 道，尽量与其它题不同。\n\n素材：\n{text}"
+    )
+    if q_type.strip():
+        user += f"\n题型偏好：{q_type.strip()}"
+    if difficulty:
+        user += f"\n难度：{difficulty}/5"
+    try:
+        content, usage = _chat(db, [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ], temperature=0.35, max_tokens=16000, json_mode=True, timeout=260.0)
+        got = _questions_payload(_repair_json(content) or content)
+        return got[0] if got else None
+    except HTTPException:
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def generate_questions(db: Session, source: str, count: int = 5, q_type: str = "",
                        difficulty: int = 0) -> dict:
-    """按题目素材/文献片段生成若干道完整竞赛题（直接进试卷，不写题库）。"""
+    """按题目素材/文献片段生成若干道完整竞赛题（直接进试卷，不写题库）。
+
+    并发下单：每题一次独立调用（各用自己的 DB 会话），比「一次要 N 道」快且不容易被截断。
+    """
     text = (source or "").strip()
     if not text:
         raise HTTPException(400, "没有可用的题目素材：先在「题干文字」里粘贴题目，或选中一段文献/裁剪题图。")
     if len(text) > 20000:
         text = text[:20000]
     n = max(1, min(12, int(count or 5)))
-    system = (
-        "你是一名化学奥林匹克竞赛命题专家。请以给定素材为主题，命制若干道完整试题。"
-        "只输出一个 JSON 对象：\n"
-        '{"questions": [{"q_type": "综合", "stem": "题干（含小问）", "answer": "参考答案", '
-        '"analysis": "解析", "knowledge_points": ["专题"], "score": 10}]}\n'
-        "要求：\n"
-        f"1. 共出 {n} 道题；每道题可以包含多个小问，小问编号写成 1-1、1-2、1-3 这种格式。\n"
-        "2. 题干必须自洽：给出必要数据、结构描述或反应条件；不要只出选择题，优先出综合、计算、机理、推断题。\n"
-        "3. answer 要完整可判分；analysis 写思路、关键判据和易错点，不要重复题干。\n"
-        "4. knowledge_points 只能从以下专题中选 1-2 个："
-        + "、".join(CHEM_TOPICS) + "。\n"
-        "5. score 为整数分值，建议 8-20 分。\n"
-        "6. 不要编造无法由给定数据推出的结论；数据不足时在题干里补上合理假设。"
-    )
-    user = f"素材：\n{text}\n\n请出 {n} 道题。"
-    if q_type.strip():
-        user += f"\n题型偏好：{q_type.strip()}"
-    if difficulty:
-        user += f"\n难度：{difficulty}/5"
-    content, usage = _chat(db, [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
-    ], temperature=0.35, max_tokens=4000, json_mode=True)
-    questions = _questions_payload(content)
+    from ..db import SessionLocal
+
+    def run(i: int):
+        d = SessionLocal()
+        try:
+            return _gen_one(d, text, q_type, difficulty, i, n)
+        finally:
+            d.close()
+
+    if n == 1:
+        items = [run(0)]
+    else:
+        with ThreadPoolExecutor(max_workers=min(3, n)) as ex:
+            items = list(ex.map(run, range(n)))
+    questions = [q for q in items if q]
     if not questions:
-        raise HTTPException(502, "AI 没有返回可用的题目，请调整素材后重试")
-    return {"questions": questions[:n], "usage": usage, "model": usage.get("model"),
-            "requested": n, "returned": len(questions)}
-
-
-LEVEL_POOL = ["高中联赛（预赛/初赛）", "决赛（CChO）", "国家集训队", "高校期末", "研究生入学"]
-
-
-def _json_ok(text: str) -> bool:
-    try:
-        json.loads(text)
-        return True
-    except Exception:  # noqa: BLE001
-        return False
-
-
-def _repair_json(text: str) -> str:
-    """把被 max_tokens 截断的 JSON 修成可解析的最小结构（{"questions":[...]} 场景）。"""
-    t = (text or "").strip()
-    if not t:
-        return ""
-    if t.startswith("```"):
-        t = re.sub(r"^```[a-zA-Z]*\s*", "", t)
-        t = re.sub(r"```\s*$", "", t).strip()
-    if _json_ok(t):
-        return t
-    cut = t.rfind("}")
-    while cut > 0:
-        cand = t[: cut + 1] + "]}"
-        if _json_ok(cand):
-            return cand
-        cut = t.rfind("}", 0, cut)
-    return ""
-
-
-def smart_questions(db: Session, source: str, count: int = 3, *, level: str = "",
-                    topics: list[str] | None = None, types: list[str] | None = None,
-                    difficulty: int = 3, extra: str = "") -> dict:
-    """按「级别 + 知识点 + 题型 + 难度 + 额外要求」命制竞赛题。
-
-    与 generate_questions 的区别：条件更细，返回里额外带 topic/type/score，
-    便于前端做成「化竞智卷」那种一张卡片一道题的生成结果面板。
-    """
-    text = (source or "").strip()
-    if not text:
-        raise HTTPException(400, "请先给出命题素材：文献片段、题干文字，或选择一份 PDF。")
-    if len(text) > 20000:
-        text = text[:20000]
-    n = max(1, min(12, int(count or 3)))
-    topic_list = [t for t in (topics or []) if str(t).strip()][:8]
-    type_list = [t for t in (types or []) if str(t).strip()][:4]
-    level_text = (level or "").strip() or "高中联赛（预赛/初赛）"
-    difficulty = max(1, min(5, int(difficulty or 3)))
-
-    system = (
-        "你是一名资深化学奥林匹克命题专家和金牌教练，只用简体中文输出。"
-        "只输出一个 JSON 对象，不要任何解释。"
-    )
-    user = (
-        f"请为【{level_text}】命制 {n} 道原创化学试题。\n"
-        f"知识点：{'、'.join(topic_list) or '由素材决定'}\n"
-        f"题型（可混合）：{'、'.join(type_list) or '综合'}\n"
-        f"难度：{difficulty}/5（5 为国家集训队选拔水平）\n"
-        + (f"额外要求：{extra.strip()[:500]}\n" if extra.strip() else "")
-        + "要求：\n"
-        "- 题目科学严谨、数据自洽，符合中国化学奥林匹克命题风格；\n"
-        "- 化学式与公式一律用 LaTeX 行内 $...$（如 $\\mathrm{H_2SO_4}$），不要用 \\ce{}；\n"
-        "- 选择题 options 给出 4 个选项并以 \"A. \" 开头；非选择题 options 为空数组；\n"
-        "- answer 给最终答案，analysis 给详细分步解析（关键原理、计算过程、易错点）；\n"
-        "- score 给建议分值（整数，8-20 之间）。\n"
-        '输出格式：{"questions": [{"q_type": "计算", "knowledge_points": ["热力学与化学平衡"], '
-        '"stem": "题干（含小问）", "options": [], "answer": "答案", "analysis": "解析", "score": 12}]}\n\n'
-        f"素材：\n{text}"
-    )
-    questions: list[dict] = []
-    usage: dict = {}
-    # 逐题生成：一次要 N 道时输出极易超过单次 token 上限被截断（实测 16000 仍会被截），
-    # 所以每题单独请求，提示词里明确「只命制 1 道」。
-    for idx in range(n):
-        ask = user.replace(f"请为【{level_text}】命制 {n} 道原创化学试题。",
-                           f"请为【{level_text}】命制 1 道原创化学试题（本次是第 {idx + 1} 道，务必与其他题不同）。")
-        content, u = _chat(db, [
-            {"role": "system", "content": system},
-            {"role": "user", "content": ask},
-        ], temperature=0.45, max_tokens=12000, json_mode=True, timeout=280.0)
-        if not (content or "").strip():
-            logger.warning("smart_questions 第 %d 题返回空内容（usage=%s），改用非 json_mode 重试", idx + 1, u)
-            content, u = _chat(db, [
-                {"role": "system", "content": "只输出 JSON 对象本身，第一个字符必须是 {，最后一个字符必须是 }，不要任何解释。"},
-                {"role": "user", "content": ask},
-            ], temperature=0.35, max_tokens=12000, json_mode=False, timeout=280.0)
-        got = _questions_payload(_repair_json(content) or content)
-        if not got:
-            # 第二遍：明确压篇幅（题干/解析都限长），避免再次被 token 上限截断
-            logger.warning("smart_questions 第 %d 题解析失败，压篇幅重试", idx + 1)
-            short = ask + "\n\n严格要求：题干不超过 280 字，解析不超过 120 字，answer 不超过 60 字，不要写推导过程。"
-            content, u = _chat(db, [
-                {"role": "system", "content": "只输出 JSON 对象本身，第一个字符必须是 {，最后一个字符必须是 }，不要任何解释与推导。"},
-                {"role": "user", "content": short},
-            ], temperature=0.35, max_tokens=12000, json_mode=True, timeout=280.0)
-            got = _questions_payload(_repair_json(content) or content)
-        if not got:
-            logger.warning("smart_questions 第 %d 题两次都解析失败，原文前 800 字：%s", idx + 1, (content or "")[:800])
-            continue
-        questions.append(got[0])
-        usage = u
-    if not questions:
-        raise HTTPException(502, "AI 没有返回可用的题目，请调整素材或条件后重试")
-    return {"questions": questions[:n], "usage": usage, "model": usage.get("model"),
+        raise HTTPException(502, "AI 没有返回可用的题目，请稍后重试或减少题数")
+    questions.sort(key=lambda q: q.get("score") or 0, reverse=True)
+    return {"questions": questions[:n], "model": "", "usage": {},
             "requested": n, "returned": len(questions)}
 
 
@@ -941,14 +916,19 @@ def document_brief(db: Session, source: str, count: int = 2, *, level: str = "",
     user = (
         "请阅读这篇文献并输出：\n"
         "1) title：文献标题（中文译名）；summary：300 字以内中文摘要；"
-        "key_points：最重要的 5-8 个要点；\n"
-        "2) excerpts：挑出与化学竞赛最相关的 3-6 个关键段落，original 为原文摘录，"
-        "translation 为中文翻译，section 为所在章节（如「实验部分」「结果与讨论」）；\n"
+        "key_points：5-8 条与反应机理、催化循环、关键中间体/过渡态、结构-活性关系、"
+        "关键反应条件有关的中文要点；不要列参考文献、致谢、作者单位、补充材料索引；\n"
+        "2) excerpts：挑出 3-6 个真正讲机理的段落（含图注/结构描述），original 为原文摘录，"
+        "translation 为中文翻译，section 为所在章节（如「结果与讨论」「机理」）；"
+        "不要选参考文献列表；\n"
+        "2b) mechanism_figures：文中与机理有关的图片/结构图说明，如「Figure 2 催化循环与中间体」，"
+        "只写图注/正文里明确提到的，最多 6 条；没有就空数组；\n"
         f"3) questions：基于文献内容改编 {n} 道适合【{level_text}】的原创竞赛题"
         "（含 q_type/knowledge_points/stem/options/answer/analysis/score；"
         "选择题 4 个选项以 \"A. \" 开头，否则 options 为空数组）。\n"
         + (f"重点关注：{focus.strip()[:500]}\n" if focus.strip() else "")
         + '输出格式：{"title": "", "summary": "", "key_points": [""], '
+        '"mechanism_figures": [""], '
         '"excerpts": [{"section": "", "original": "", "translation": ""}], '
         '"questions": [{"q_type": "", "knowledge_points": [], "stem": "", "options": [], '
         '"answer": "", "analysis": "", "score": 10}]}\n\n'
@@ -967,6 +947,9 @@ def document_brief(db: Session, source: str, count: int = 2, *, level: str = "",
     key_points = data.get("key_points") or []
     if isinstance(key_points, str):
         key_points = [x.strip() for x in re.split(r"[；;\n]", key_points) if x.strip()]
+    mech_figs = data.get("mechanism_figures") or []
+    if isinstance(mech_figs, str):
+        mech_figs = [x.strip() for x in re.split(r"[；;]", mech_figs) if x.strip()]
     excerpts = []
     for item in data.get("excerpts") or []:
         if not isinstance(item, dict):
@@ -985,6 +968,7 @@ def document_brief(db: Session, source: str, count: int = 2, *, level: str = "",
         "title": str(data.get("title") or "").strip()[:160],
         "summary": str(data.get("summary") or "").strip()[:1200],
         "key_points": [str(x).strip()[:400] for x in key_points if str(x).strip()][:8],
+        "mechanism_figures": [str(x).strip()[:300] for x in mech_figs if str(x).strip()][:6],
         "excerpts": excerpts[:6],
         "questions": questions[:n] if n else [],
         "usage": usage,
@@ -992,37 +976,68 @@ def document_brief(db: Session, source: str, count: int = 2, *, level: str = "",
     }
 
 
+def _local_split_paper(raw: str) -> dict:
+    """模型不可用时的兜底：按「1. / 第1题」粗拆，保证整卷导入不直接报错。"""
+    lines = [ln.strip() for ln in raw.splitlines()]
+    starts: list[tuple[int, str]] = []
+    for ln in lines:
+        m = re.match(r"^\s*(?:第\s*)?(\d{1,2})\s*(?:题|[.、．])\s*(.*)$", ln)
+        if m:
+            num = int(m.group(1))
+            if 1 <= num <= 99:
+                starts.append((num, ln))
+    if not starts:
+        raise HTTPException(502, "没能从这份文件里认出题号，请换清晰版或改用「按题号裁图」")
+    first_line = next((ln for ln in lines if ln), "")
+    questions = []
+    for i, (num, head) in enumerate(starts):
+        idx = lines.index(head)
+        nxt = lines.index(starts[i + 1][1]) if i + 1 < len(starts) else len(lines)
+        chunk = "\n".join(x for x in lines[idx:nxt] if x)[:6000]
+        questions.append({
+            "q_type": "综合", "stem": chunk, "answer": "", "analysis": "",
+            "knowledge_points": [], "score": 10, "difficulty": 2,
+        })
+    return {"title": first_line[:120], "questions": questions, "usage": {}, "model": "local"}
+
+
 def parse_paper(db: Session, text: str) -> dict:
-    """把整张试卷的文字（题目 + 答案）拆成结构化题目，并自动分类。"""
+    """把整张试卷的文字（题目 + 答案）拆成结构化题目，并自动分类。
+
+    模型不可用/返回不合法时退化为本地按题号粗拆，避免整卷导入直接失败。
+    """
     raw = (text or "").strip()
     if not raw:
         raise HTTPException(400, "文件里没有可读文字（扫描件也识别失败），请换清晰版或先裁剪成图片题。")
-    if len(raw) > 60000:
-        raw = raw[:60000]
+    if len(raw) > 24000:
+        raw = raw[:24000]
     system = (
-        "你是化学竞赛试卷整理助手。请把给定试卷文字拆成逐题结构化数据，题目与答案要对应起来。"
-        "只输出 JSON：{\"title\": \"试卷标题\", \"questions\": [{\"q_type\": \"综合\", "
-        "\"stem\": \"题干（保留小题号）\", \"answer\": \"该题答案\", \"analysis\": \"\", "
-        "\"knowledge_points\": [\"有机化学\"], \"score\": 10}]}\n"
+        '你是化学竞赛试卷整理助手。请把给定试卷文字拆成逐题结构化数据，题目与答案要对应起来。'
+        '只输出 JSON：{"title": "试卷标题", "questions": [{"q_type": "综合", '
+        '"stem": "题干（保留小题号）", "answer": "该题答案", "analysis": "", '
+        '"knowledge_points": ["有机化学"], "score": 10}]}\n'
         "要求：\n"
         "1. 输入可能是一份合卷，也可能是「题目卷 + 答案卷」多份文档（有 === 文档：… === 分隔）；"
-        "按试卷题号拆题、把答案卷里的答案配对到对应题目，题与题之间不要合并。\n"
+        "按试卷题号拆题、把答案卷里的答案配对到对应题目；同一大题号下的 1-1、1-2、1-3… 必须合并成一道题（保留全部小问），不同大题号才分开。\n"
         "2. 找不到答案的题 answer 留空字符串；不要编造答案。\n"
         "3. knowledge_points 从这些专题里选 1-2 个：" + "、".join(CHEM_TOPICS) + "。\n"
         "4. q_type 用「综合」「计算」「简答」「填空」「选择」等；竞赛大题优先「综合」。\n"
         "5. 忽略页眉页脚、考试说明、分数框等噪声。"
     )
-    content, usage = _chat(db, [
-        {"role": "system", "content": system},
-        {"role": "user", "content": raw},
-    ], temperature=0.1, max_tokens=6000, json_mode=True)
+    try:
+        content, usage = _chat(db, [
+            {"role": "system", "content": system},
+            {"role": "user", "content": raw},
+        ], temperature=0.1, max_tokens=5000, json_mode=True)
+    except HTTPException:
+        return _local_split_paper(raw)
     try:
         data = _json_from_text(content)
     except HTTPException:
         data = {}
     questions = _questions_payload(json.dumps(data, ensure_ascii=False) if isinstance(data, dict) else content)
     if not questions:
-        raise HTTPException(502, "AI 没能把这份试卷拆成题目，请确认上传的是试卷（不是答案单独一页）")
+        return _local_split_paper(raw)
     title = str(data.get("title") or "").strip()[:120] if isinstance(data, dict) else ""
     return {"title": title, "questions": questions, "usage": usage, "model": usage.get("model")}
 

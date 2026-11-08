@@ -18,14 +18,40 @@ def _esc(s) -> str:
     return html.escape(str(s)) if s is not None else ""
 
 
+
+_NAME_PREFIX = re.compile(r"^\s*第\s*\d+\s*题\s*[·:：.、]?\s*")
+
+
+def _img_html(img) -> str:
+    """图片节点：字符串路径或 {path} 字典都兼容。"""
+    path = img.get("path") if isinstance(img, dict) else img
+    if not path:
+        return ""
+    return f'<div class="qimg"><img src="/api/images/{_esc(path)}" alt="题图"/></div>'
+
+
+def _imgs_html(imgs) -> str:
+    if not imgs:
+        return ""
+    if isinstance(imgs, dict):
+        imgs = imgs.get("images") or []
+    return "".join(_img_html(i) for i in imgs)
+
 def _stem_html(item) -> str:
     snap = item.snapshot
-    stem = _esc(snap.get("stem"))
+    raw = str(snap.get("stem") or "")
+    imgs = snap.get("images") or []
+    if imgs:
+        # 图片题：题干里的「第 N 题 xxx」是拆题时自动带的，卷面别重复
+        raw = _NAME_PREFIX.sub("", raw).strip()
+    stem = _esc(raw)
     # 手工换行保留
     stem = stem.replace("\n", "<br/>")
     if snap.get("options"):
         opts = "　　".join(f"{_esc(o)}" for o in snap["options"])
         stem += f'<div class="opts">{opts}</div>'
+    if imgs:
+        return "".join(_img_html(img) for img in imgs)
     if snap.get("images"):
         for img in snap["images"]:
             stem += f'<div class="qimg"><img src="/api/images/{_esc(img.get("path"))}" alt="题图"/></div>'
@@ -63,23 +89,30 @@ def render_paper_html(session: Session, paper: Paper, part: str = "all") -> str:
     a_rows: list[str] = []
     for t, items in by_type.items():
         score = sum(it.score for it in items)
-        q_rows.append(
-            f"<div class='section-title'>{_esc(t)}（共 {len(items)} 题，{score:g} 分）</div>")
+        all_img = all((it.snapshot or {}).get("images") for it in items)
+        if not all_img:   # 纯图片题：卷面上本来就有标题/分值，不再加小标题
+            q_rows.append(
+                f"<div class='section-title'>{_esc(t)}（共 {len(items)} 题，{score:g} 分）</div>")
         q_rows.append("<ol class='qs'>")
-        a_rows.append(f"<div class='section-title'>{_esc(t)}</div><ol class='qs anslist'>")
+        if not all((it.snapshot or {}).get("images") for it in items):
+            a_rows.append(f"<div class='section-title'>{_esc(t)}</div>")
+        a_rows.append("<ol class='qs anslist'>")
         for it in items:
             snap = it.snapshot or {}
             style = _item_style(snap)
+            has_img = bool((it.snapshot or {}).get("images"))
+            score_span = "" if has_img else f"<span class='score'>({it.score:g}分)</span>"
             q_rows.append(
                 f"<li data-pq='{it.id}'><div class='stem' contenteditable='true' style='{style}' "
                 f"data-field='stem' title='可直接改题干，改完点上方「保存修改」'>{_stem_html(it)}"
-                f"<span class='score'>({it.score:g}分)</span></div></li>")
+                f"{score_span}</div></li>")
             ans = it.snapshot.get("answer") or ""
+            ans_imgs = _imgs_html((it.snapshot.get("answer_layout") or {}).get("images"))
             analysis = it.snapshot.get("analysis") or ""
             unit = it.snapshot.get("unit_name") or ""
             a_rows.append(
                 f"<li data-ans-pq='{it.id}'><div class='ans'><b>答案：</b>"
-                f"<span contenteditable='true' data-field='answer'>{_esc(ans)}</span>"
+                f"<span contenteditable='true' data-field='answer'>{_esc(ans)}</span>{ans_imgs}"
                 + (f"　<b>解析：</b><span contenteditable='true' data-field='analysis'>{_esc(analysis)}</span>" if analysis else "")
                 + (f"　<span class='src'>[{_esc(unit)}·{_esc(it.snapshot.get('source_book_title'))}]</span>" if unit else "")
                 + "</div></li>")
@@ -96,32 +129,27 @@ def render_paper_html(session: Session, paper: Paper, part: str = "all") -> str:
 <html lang="zh"><head><meta charset="utf-8">
 <title>{_esc(paper.title)}</title>
 <style>
-  @page {{ size: A4; margin: 16mm 14mm; }}
+  @page {{ size: A4; margin: 22mm 32mm 20mm; }}
   html {{ color-scheme: light; }}
-  body {{ background: #fff; color: #111; font-family: "KaiTi","楷体","STKaiti","SimSun",serif; font-size: 13.5pt; line-height: 2; }}
-  h1 {{ text-align:center; font-size: 19pt; margin: 0 0 4px; }}
-  .meta {{ text-align:center; color:#333; font-size: 11pt; margin-bottom: 8px; }}
-  .headrow {{ display:flex; justify-content: space-between; font-size: 12pt; margin: 10px 0 4px; }}
-  .note {{ text-align:center; color:#555; font-size: 10.5pt; margin-bottom: 6px; }}
-  .warn {{ color:#b00; font-size: 10.5pt; }}
-  .section-title {{ font-weight: bold; font-size: 14pt; margin: 14px 0 2px; }}
-  ol.qs {{ margin: 0 0 0 1.6em; padding: 0; }}
-  ol.qs > li {{ margin-bottom: 10px; }}
-  .score {{ color:#666; font-size: 10.5pt; }}
-  .opts {{ margin-top: 2px; }}
-  .qimg img {{ max-width: 60%; }}
-  .ans {{ font-size: 10.5pt; color:#060; border-left: 3px solid #9c9; padding-left: 8px; margin: 2px 0 6px; }}
-  .src {{ color:#999; }}
+  body {{ background: #fff; color: #000; font-family: "SimSun","宋体","Times New Roman",serif; font-size: 10.5pt; line-height: 1.45; }}
+  h1 {{ font-family: "SimHei","黑体",serif; text-align:center; font-size: 12.5pt; margin: 0 0 2.4mm; letter-spacing:.3px; }}
+  .meta {{ text-align:center; color:#333; font-size: 9.5pt; margin: 0 0 2mm; }}
+  .headrow {{ display:flex; justify-content: space-between; font-size: 9.5pt; margin: 2mm 0 1.2mm; }}
+  .note {{ text-align:center; color:#444; font-size: 9pt; margin-bottom: 1.4mm; }}
+  .warn {{ color:#b00; font-size: 9pt; }}
+  .section-title {{ font-family: "Arial","Microsoft YaHei",sans-serif; font-weight: bold; font-size: 10.5pt; margin: 3.6mm 0 1.2mm; }}
+  ol.qs {{ margin: 0; padding: 0; list-style: none; }}
+  ol.qs > li {{ margin-bottom: 1.6mm; page-break-inside: avoid; }}
+  .qno {{ font-family: "Arial","Microsoft YaHei",sans-serif; font-weight: 700; margin-right: 1.4mm; }}
+  .score {{ color:#000; font-size: 9.5pt; }}
+  .opts {{ margin-top: 0.6mm; }}
+  .qimg img {{ max-width: 100%; }}
+  .ans {{ font-size: 9.8pt; color:#000; border-left: 2px solid #bbb; padding-left: 6px; margin: 1mm 0 1.8mm; }}
+  .src {{ color:#666; font-size: 9pt; }}
   .anssheet {{ page-break-before: always; }}
-  .anssheet h2 {{ text-align:center; font-size: 16pt; }}
+  .anssheet h2 {{ font-family: "SimHei","黑体",sans-serif; text-align:center; font-size: 11.5pt; margin-bottom: 2.4mm; }}
   .blank {{ border-bottom: 1px solid #333; display:inline-block; min-width: 3em; }}
   .editable:focus {{ outline: 2px dashed #2f6fed; outline-offset: 2px; background: #f8fbff; }}
-  @media screen {{
-    body {{ max-width: 800px; margin: 0 auto; padding: 24px; }}
-    .toolbar {{ position: fixed; top: 8px; right: 8px; display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; max-width: 340px; }}
-    .toolbar button, .toolbar a {{ font-size: 13px; padding: 6px 12px; cursor: pointer; }}
-    .toolbar a button {{ width: 100%; }}
-  }}
   @media print {{ .toolbar {{ display: none }} }}
 </style></head>
 <body>

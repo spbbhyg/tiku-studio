@@ -228,3 +228,16 @@ class QuestionVersion(Base):
     note: Mapped[str | None] = mapped_column(String(200), nullable=True)
     snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class QuestionNote(Base):
+    """题下的讨论/提问。老师之间就一道题留的批注，不进题库正文。"""
+
+    __tablename__ = "question_notes"
+    __table_args__ = (Index("ix_qn_question", "question_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    question_id: Mapped[int] = mapped_column(ForeignKey("questions.id", ondelete="CASCADE"))
+    author: Mapped[str] = mapped_column(String(32), default="我")
+    body: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
