@@ -683,7 +683,7 @@ function keysGlobal(e) {
 <template>
   <div class="pm" @keydown="keysGlobal" @focusin="onFocusIn">
     <header class="pmbar">
-      <router-link to="/exam" class="back">← 出整卷</router-link>
+      <router-link to="/compose" class="back">← 去组卷</router-link>
       <input v-model="doc.title" class="ttl" placeholder="卷名：第 41 届…… 考试卷 3" @input="saveLocal" />
       <span class="stat">
         总分 <b>{{ fmt(stats.total) }}</b> ｜ 已用 <b :class="{ bad: stats.total && stats.used !== stats.total }">{{ fmt(stats.used) }}</b>

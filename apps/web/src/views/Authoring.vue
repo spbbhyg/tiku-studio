@@ -7,8 +7,10 @@ import { loadShortcuts, matchCombo } from '../shortcuts.js'
 import { flowText } from '../textflow.js'
 import CanvasPane from '../components/CanvasPane.vue'
 import FormulaPad from '../components/FormulaPad.vue'
+import { extractFromFrame } from '../ketcherSvg.js'
 import Icon from '../components/Icon.vue'
 import TextMode from '../components/TextMode.vue'
+import ExamHome from './ExamHome.vue'
 
 const drawer = ref('')            // '' | 'formula' | 'struct' | 'pdf' | 'subs'
 
@@ -120,12 +122,22 @@ async function ketcherSetFromInput() {
 }
 
 async function ketcherTake() {
-  const r = await ketcherPost({ type: 'ketcher:get' })
-  if (!r.ok || !r.molfile) { smilesMsg.value = '画板里还没有结构'; return }
+  // 先整块画布出图：直接读同源 iframe 里的 SVG。箭头/加号/文字不是化学图元，
+  // Ketcher 自己也会拒绝把带箭头的结构存成 MOL（"cannot be saved as *.MOL due to reaction arrows"），
+  // 所以这里不能等 molfile —— SVG 才是唯一能完整保留画面的东西。
+  const whole = extractFromFrame(kframe.value)
+  const r = whole ? { ok: true, molfile: '' } : await ketcherPost({ type: 'ketcher:get' })
+  const svgPayload = (whole && whole.svg) || r.svg || ''
+  if (!svgPayload) {
+    smilesMsg.value = '画板里还没有结构'
+    return
+  }
   smilesMsg.value = '正在生成图…'
   try {
-    const res = await api.post('/api/v2/chem', { kind: 'structure', molfile: r.molfile, svg: r.svg || '', renderer: 'ketcher' })
-    const svgOut = (res && res.svg) || r.svg || ''
+    const res = await api.post('/api/v2/chem', {
+      kind: 'structure', molfile: r.molfile || null, svg: svgPayload, renderer: 'ketcher',
+    })
+    const svgOut = (res && res.svg) || svgPayload
     if (svgOut) smilesSvg.value = String(svgOut).replace(/^<\?xml[^>]*\?>\s*/i, '')
 
     // 直接把结构图插入当前画布（题目/答案按当前标签页决定）
@@ -230,82 +242,6 @@ const msg = ref('')
 const err = ref('')
 const pageImg = ref(null)
 // ── AI 拆题：试卷 + 答案 → 结构化预览 ───────────────────────────────
-const splitOpen = ref(false)
-const splitBusy = ref(false)
-const splitErr = ref('')
-const splitMsg = ref('')
-const splitPaper = ref(null)     // File
-const splitAnswer = ref(null)    // File | null
-const splitItems = ref([])
-const splitBook = ref(null)
-const bookList = ref([])
-
-async function openSplit() {
-  splitOpen.value = true
-  splitErr.value = ''
-  splitMsg.value = ''
-  if (!bookList.value.length) {
-    try {
-      const r = await api.get('/api/books')
-      bookList.value = (Array.isArray(r) ? r : (r.items || []))
-      if (!splitBook.value && bookList.value.length) splitBook.value = bookList.value[0].id
-    } catch (e) { /* 忽略：只影响入库下拉 */ }
-  }
-}
-function pickSplitFile(e, which) {
-  const f = (e.target.files || [])[0] || null
-  if (which === 'paper') splitPaper.value = f
-  else splitAnswer.value = f
-}
-async function runSplit() {
-  if (!splitPaper.value) { splitErr.value = '先选一份题目卷 PDF'; return }
-  splitBusy.value = true
-  splitErr.value = ''
-  splitMsg.value = ''
-  splitItems.value = []
-  try {
-    const fd = new FormData()
-    fd.append('paper', splitPaper.value)
-    if (splitAnswer.value) fd.append('answer', splitAnswer.value)
-    const r = await api.postForm('/api/wb/parse-preview', fd)
-    splitItems.value = r.items || []
-    const miss = splitItems.value.filter(x => !String(x.answer || '').trim()).length
-    splitMsg.value = `拆出 ${r.count} 题${splitAnswer.value ? `，${r.count - miss} 题配到了答案` : ''}${miss && splitAnswer.value ? `，${miss} 题没配上` : ''}`
-  } catch (e) {
-    splitErr.value = e.message || String(e)
-  } finally { splitBusy.value = false }
-}
-const cropPreview = ref('')
-function previewCrop(c) { cropPreview.value = '/api/images/' + c }
-function putSplit(it) {
-  const stem = String(it.stem || '').trim()
-  const ans = String(it.answer || '').trim()
-  if (stem && qPane.value) qPane.value.addText(stem)
-  for (const c of (it.crops || [])) {
-    try { if (qPane.value) qPane.value.addImage(c) } catch (e) { /* 单张失败忽略 */ }
-  }
-  if (ans && aPane.value) aPane.value.addText(ans)
-  form.stem = stem || form.stem
-  if (ans) form.answer = ans
-  msg.value = ans
-    ? `已放入第 ${it.no} 题：题干进「题目」画布、答案进「答案」画布（点上方「答案」标签看）`
-    : `已放入第 ${it.no} 题的题干；这份没有答案`
-  splitOpen.value = false
-}
-async function importSplit() {
-  if (!splitItems.value.length) { splitErr.value = '先拆一次'; return }
-  if (!splitBook.value) { splitErr.value = '选一个书册'; return }
-  splitBusy.value = true
-  try {
-    const r = await api.post('/api/wb/parse-import', {
-      book_id: splitBook.value,
-      items: splitItems.value,
-      source_title: (splitPaper.value && splitPaper.value.name) || 'AI 拆题',
-    })
-    splitMsg.value = `已入库 ${r.created} 题（重复跳过 ${r.skipped} 题）`
-  } catch (e) { splitErr.value = e.message || String(e) } finally { splitBusy.value = false }
-}
-
 const qPane = ref(null)
 const aPane = ref(null)
 const activePane = ref('q')
@@ -380,6 +316,85 @@ async function loadDocs() {
 }
 
 const pdfDrag = ref(false)
+// 出题四步：上一步/下一步只是把该开的抽屉、该切的画布摆好，不拦人，也不改内容
+const STEPS = [
+  { n: 1, t: '导入文献', d: '第 1 步：把 PDF 拖进右侧「PDF 文献」栏（题目多就直接拖整份试卷）' },
+  { n: 2, t: '裁图排版', d: '第 2 步：在页面上框选题目，拖进题目画布，调位置和字号' },
+  { n: 3, t: '写答案', d: '第 3 步：切到「答案」画布，裁剪答案图或手写解析' },
+  { n: 4, t: '收入题库', d: '第 4 步：填出题人，点右上角保存，题目直接进本地题库' },
+]
+const step = ref(1)
+// 答案画布：把题目画布的整体排版垫到上面，光标停在下面写解析（不用自己再复制一遍题目）
+function draftAnswerOnQuestion() {
+  const q = qPane.value
+  const a = aPane.value
+  if (!q || !a) return
+  const lay = q.getLayout()
+  const list = lay.blocks || []
+  if (!list.length) { msg.value = '题目画布还是空的，先把题目放进来再点这个'; return }
+  const bottom = list.reduce((m, b) => Math.max(m, (Number(b.y) || 0) + (b.type === 'image' ? (b.h || 0) : 40)), 0)
+  const gid = `tpl-${Date.now().toString(36)}`
+  const n = a.addBlocks(list, { dy: 0, gid, tip: `已把题目（${list.length} 个元素）垫在答案画布上，在它下面写解析就行` })
+  if (n) {
+    ctab.value = 'a'
+    step.value = Math.max(step.value, 3)
+    msg.value = `题目已垫在上面（已组合，可整体拖动）：题目底边在 ${Math.round(bottom)}pt，往下拖一点再在下面加解析`
+  }
+}
+
+function goStep(n) {
+  step.value = clamp(Math.round(n) || 1, 1, STEPS.length)
+  if (step.value === 1) { drawer.value = 'pdf' }
+  if (step.value === 2) { drawer.value = ''; ctab.value = 'q' }
+  if (step.value === 3) { drawer.value = ''; ctab.value = 'a' }
+  if (step.value === 4) { drawer.value = '' }
+  msg.value = STEPS[step.value - 1].d
+}
+
+// 从电脑里把文件拖到画布上：图片直接落成图片块；PDF 存进文献，右栏立刻打开它等着框选
+async function onCanvasFiles({ files, x, y }, which = 'q') {
+  const pane = which === 'q' ? qPane.value : aPane.value
+  if (!pane) return
+  const list = Array.from(files || [])
+  const imgs = list.filter((f) => /^image\//i.test(f.type || '') || /\.(png|jpe?g|webp|gif|bmp)$/i.test(f.name || ''))
+  const pdfs = list.filter((f) => /pdf/i.test(f.type || '') || /\.pdf$/i.test(f.name || ''))
+  if (!imgs.length && !pdfs.length) { toast('只认图片和 PDF'); return }
+  err.value = ''
+  for (const f of imgs) {
+    busy.value = `正在放入 ${f.name}…`
+    try {
+      const fd = new FormData()
+      fd.append('file', f, f.name || 'paste.png')
+      const r = await api.postForm('/api/v2/materials/upload', fd)
+      await pane.addImage(r.path, x, y)
+    } catch (e2) {
+      err.value = `图片「${f.name}」放不进去：${e2?.message || e2}`
+    }
+  }
+  for (const f of pdfs) {
+    busy.value = `正在读入 ${f.name}…`
+    try {
+      const fd = new FormData()
+      fd.append('file', f, f.name || 'doc.pdf')
+      const d = await api.postForm('/api/manual/upload', fd)
+      const i = docs.value.findIndex((x2) => x2.doc_id === d.doc_id)
+      const item = { doc_id: d.doc_id, filename: d.filename, page_count: d.page_count }
+      if (i >= 0) docs.value.splice(i, 1, item)
+      else docs.value.unshift(item)
+      await loadDocs()
+      activeDoc.value = docs.value.find((x2) => x2.doc_id === d.doc_id) || docs.value[0] || null
+      pageNo.value = 1
+      sel.value = null
+      drawer.value = 'pdf'
+      msg.value = `已放入「${d.filename}」（${d.page_count} 页）：在右边页面上拖框，就能像文献裁图一样裁进画布`
+    } catch (e2) {
+      err.value = `PDF「${f.name}」读不进来：${e2?.message || e2}`
+    }
+  }
+  busy.value = ''
+  if (imgs.length && !pdfs.length) msg.value = `已放入 ${imgs.length} 张图`
+}
+
 async function onPdfDrop(e) {
   pdfDrag.value = false
   const fl = Array.from(e.dataTransfer?.files || []).filter((f) => /pdf|image\//i.test(f.type || f.name))
@@ -759,6 +774,8 @@ const meta = reactive({ books: [], tags: [], qtypes: [], default_book_id: null }
 const form = reactive({
   book_id: null, unit_id: null, q_type: '综合', difficulty: 2, tags: [],
   source_title: '', source_citation: '', locator: '', status: 'confirmed', answer: '',
+  author: localStorage.getItem('tiku-author-name') || '',
+  topic: 'organic', year: null,
 })
 const units = computed(() => {
   const b = meta.books.find((x) => x.id === form.book_id)
@@ -791,37 +808,101 @@ const saving = ref(false)
 const editingQuestionId = ref(null)
 const savedId = ref(null)
 
-async function save() {
-  const ql = qPane.value ? qPane.value.getLayout() : null
-  if (!ql || !ql.blocks.length) { err.value = '题目画布是空的：先裁剪或写点文字'; return }
-  saving.value = true
-  err.value = ''; msg.value = ''
+// ---------- 入库：出的题直接进本地题库（D:\化学竞赛题库） ----------
+const bankBase = ref('http://127.0.0.1:8080')
+async function loadBankBase() {
   try {
-    const r = await api.post('/api/authoring/compose', {
-      layout: ql,
-      answer_layout: aPane.value ? aPane.value.getLayout() : null,
-      question_id: editingQuestionId.value || null,
-      book_id: form.book_id, unit_id: form.unit_id,
-      q_type: form.q_type, difficulty: Number(form.difficulty),
-      tags: form.tags, source_title: form.source_title,
-      source_citation: form.source_citation, locator: form.locator,
-      status: form.status, answer: form.answer,
-      analysis: analysisText.value,
-      stem_text: aiStem.value,
-      auto_classify: true,
-    })
-    editingQuestionId.value = r.id
-    savedId.value = r.id
+    const s = await api.get('/api/chemy/status')
+    if (s && s.base) bankBase.value = s.base
+  } catch (e2) { /* 题库没起来也不挡出题 */ }
+}
+function layoutText(lay) {
+  const blocks = (lay && lay.blocks ? lay.blocks : []).filter((b) => b.type === 'text' && String(b.text || '').trim())
+  blocks.sort((a, b) => (Number(a.y) || 0) - (Number(b.y) || 0) || (Number(a.x) || 0) - (Number(b.x) || 0))
+  return blocks.map((b) => String(b.text || '').trim()).join('\n')
+}
+async function layoutImages(lay) {
+  const out = []
+  for (const b of (lay && lay.blocks ? lay.blocks : []).filter((x) => x.type === 'image' && x.path)) {
+    try {
+      const r = await fetch(imgUrl(b.path))
+      if (!r.ok) continue
+      const blob = await r.blob()
+      const data = await new Promise((res) => {
+        const fr = new FileReader()
+        fr.onload = () => res(String(fr.result || ''))
+        fr.onerror = () => res('')
+        fr.readAsDataURL(blob)
+      })
+      if (data) out.push({ name: String(b.path).split('/').pop() || 'figure.png', data })
+    } catch (e2) { /* 单张图失败不影响入库 */ }
+  }
+  return out
+}
+function rememberAuthor() {
+  try { localStorage.setItem('tiku-author-name', String(form.author || '').trim()) } catch (e2) { /* 隐私模式下写不了也不影响出题 */ }
+}
+function requireAuthor() {
+  const a = String(form.author || '').trim()
+  if (!a) {
+    err.value = '请先在右下角「入库信息」里填出题人：入库的题目必须能追到是谁出的'
+    auxOpen.value = true
+    return ''
+  }
+  localStorage.setItem('tiku-author-name', a)
+  return a
+}
+async function publishToBank() {
+  const ql = qPane.value ? qPane.value.getLayout() : null
+  if (!ql || !ql.blocks.length) { err.value = '题目画布是空的：先裁剪或写点文字'; return null }
+  const author = requireAuthor()
+  if (!author) return null
+  const stem = layoutText(ql)
+  const answer = layoutText(aPane.value ? aPane.value.getLayout() : null) || form.answer || ''
+  const images = await layoutImages(ql)
+  const firstLine = (stem.split('\n')[0] || '').slice(0, 40)
+  return api.post('/api/chemy/publish', {
+    title: form.source_title || firstLine || '未命名题目',
+    topic: form.topic || 'organic',
+    year: form.year ? Number(form.year) : null,
+    stem, answer, author, images, publish: true,
+    paper_title: `神奋出题 · ${author}`,
+  })
+}
+
+async function save() {
+  saving.value = true
+  err.value = ''
+  msg.value = ''
+  try {
+    const r = await publishToBank()
+    if (!r) return
+    savedId.value = (r.qids && r.qids[0]) || ''
+    editingQuestionId.value = ''
     canvasDirty.value = false
-    if (r.q_type) form.q_type = r.q_type
-    if (r.difficulty) form.difficulty = Number(r.difficulty)
-    if (Array.isArray(r.tags)) form.tags = [...r.tags]
-    const cls = r.classified || {}
-    let text = `${r.created ? '已入库' : '已更新'} #${r.id}；AI 归类为「${cls.q_type || form.q_type}」· 难度 ${cls.difficulty || form.difficulty}`
-    if (cls.topics && cls.topics.length) text += `；专题：${cls.topics.join('、')}`
-    if (cls.reason) text += `（${cls.reason}）`
-    msg.value = text
-    loadMeta()
+    clearDraft()
+    msg.value = `已存入本地题库：批次 ${r.batch}，导入了 ${r.count} 题，已发布 ${r.published} 题`
+  } catch (e2) {
+    err.value = e2?.message || String(e2)
+  } finally { saving.value = false }
+}
+
+// 导出 = 先入库，再按题库的方式出打印页（本项目的导出器不用）
+async function saveAndExport() {
+  saving.value = true
+  err.value = ''
+  msg.value = ''
+  try {
+    const r = await publishToBank()
+    if (!r) return
+    const qid = (r.qids && r.qids[0]) || ''
+    savedId.value = qid
+    canvasDirty.value = false
+    clearDraft()
+    if (!qid) { err.value = '题库没给出题号，导出没打开'; return }
+    const url = `${bankBase.value}/print/q/${encodeURIComponent(qid)}?answers=1`
+    window.open(url, '_blank')
+    msg.value = `已存入本地题库（批次 ${r.batch}）→ 已打开题库的打印页；要整卷就在题库里勾选后打印`
   } catch (e2) {
     err.value = e2?.message || String(e2)
   } finally { saving.value = false }
@@ -1091,6 +1172,7 @@ function resetAll() {
   savedId.value = null
   analysisText.value = ''
   err.value = ''
+  clearDraft()
   msg.value = '画布已清空，可以出下一题'
 }
 
@@ -1123,7 +1205,7 @@ async function loadExisting(id) {
   }
 }
 
-function goBank() { router.push('/questions') }
+function goBank() { router.push('/bank') }
 
 // ---------- 快捷键：作用在「当前」画布 ----------
 function paneOf(key) { return key === 'a' ? aPane.value : qPane.value }
@@ -1155,6 +1237,104 @@ function onPaneChanged(key) {
   const h = paneHist(key)
   clearTimeout(h.t)
   h.t = setTimeout(() => { h.t = null; takeSnap(key) }, 400)
+  scheduleDraft()
+}
+
+// ───────── 草稿：出到一半关掉页面也不丢 ─────────
+const draftId = ref(localStorage.getItem('tiku-draft-id') || '')
+const draftAt = ref('')
+const draftFound = ref(null)
+let draftTimer = 0
+
+function firstLine(lay) {
+  const blocks = (lay && lay.blocks) || []
+  const t = blocks.find(b => b && b.type === 'text' && String(b.text || '').trim())
+  return t ? String(t.text).trim().split('\n')[0].slice(0, 40) : ''
+}
+
+function draftSnapshot() {
+  const q = qPane.value ? qPane.value.getLayout() : null
+  const a = aPane.value ? aPane.value.getLayout() : null
+  const n = ((q && q.blocks) || []).length + ((a && a.blocks) || []).length
+  if (!n) return null
+  return {
+    id: draftId.value, mode: editMode.value,
+    title: form.source_title || firstLine(q) || '未命名草稿',
+    payload: {
+      q_layout: q, a_layout: a, step: step.value, ctab: ctab.value,
+      form: { author: form.author, topic: form.topic, year: form.year, answer: form.answer, source_title: form.source_title },
+    },
+  }
+}
+
+function scheduleDraft() {
+  clearTimeout(draftTimer)
+  draftTimer = setTimeout(saveDraftNow, 3000)
+}
+
+async function saveDraftNow() {
+  const snap = draftSnapshot()
+  if (!snap) return
+  try {
+    const r = await api.post('/api/drafts', snap)
+    draftId.value = r.id
+    draftAt.value = r.updated_at
+    try { localStorage.setItem('tiku-draft-id', r.id) } catch (e2) { /* 隐私模式忽略 */ }
+  } catch (e2) { /* 自动保存失败不打扰，下次改动再试 */ }
+}
+
+async function findDraft() {
+  try {
+    const r = await api.get('/api/drafts')
+    const list = r.drafts || []
+    if (!list.length) return
+    const mine = list.find(d => d.id === draftId.value) || list[0]
+    if ((mine.blocks || 0) > 0) draftFound.value = mine
+  } catch (e2) { /* 后端没起来就不提示 */ }
+}
+
+async function loadDraftById(id) {
+  const d = await api.get('/api/drafts/' + id)
+  const pl = d.payload || {}
+  if (pl.q_layout && qPane.value) qPane.value.setLayout(pl.q_layout)
+  if (pl.a_layout && aPane.value) aPane.value.setLayout(pl.a_layout)
+  const f = pl.form || {}
+  form.author = f.author || form.author
+  form.topic = f.topic || form.topic
+  form.year = (f.year === null || f.year === undefined) ? form.year : f.year
+  form.answer = f.answer || form.answer
+  form.source_title = f.source_title || form.source_title
+  step.value = Math.max(1, Math.min(STEPS.length, Number(pl.step) || 1))
+  draftId.value = id
+  try { localStorage.setItem('tiku-draft-id', id) } catch (e2) {}
+  resetHist('q')
+  resetHist('a')
+  canvasDirty.value = false
+  draftFound.value = null
+  msg.value = `已继续草稿「${d.title || ''}」（${d.updated_at || ''}），改完点保存就进本地题库`
+}
+
+async function useDraft() {
+  const found = draftFound.value
+  if (!found) return
+  draftFound.value = null
+  try {
+    await loadDraftById(found.id)
+  } catch (e2) { /* 草稿坏了就当没有 */ }
+}
+
+function dropDraft() {
+  const found = draftFound.value
+  draftFound.value = null
+  if (found) api.delete('/api/drafts/' + found.id).catch(() => {})
+}
+
+function clearDraft() {
+  const old = draftId.value
+  draftId.value = ''
+  draftAt.value = ''
+  try { localStorage.removeItem('tiku-draft-id') } catch (e2) {}
+  if (old) api.delete('/api/drafts/' + old).catch(() => {})
 }
 
 function flushHist(key) {
@@ -1277,6 +1457,7 @@ async function onPaste(e) {
 onMounted(async () => {
   await loadMeta()
   await loadDocs()
+  loadBankBase()
   try {
     const saved = JSON.parse(localStorage.getItem('tiku-aux-pos') || 'null')
     if (saved && Number.isFinite(saved.x)) { fpos.x = saved.x; fpos.y = saved.y }
@@ -1290,8 +1471,13 @@ onMounted(async () => {
   if (qid) await nextTick().then(() => loadExisting(qid))
   resumePaperJob()
   if (!qid) { resetHist('q'); resetHist('a') }
+  if (!qid) findDraft()
+  const did = String(route.query.draft || '')
+  if (did) { try { await loadDraftById(did) } catch (e2) { /* 草稿不存在就算了 */ } }
 })
 onBeforeUnmount(() => {
+  if (canvasDirty.value) saveDraftNow()
+  clearTimeout(draftTimer)
   stopPaperJobPoll()
   window.removeEventListener('keydown', onKeys)
   window.removeEventListener('paste', onPaste)
@@ -1305,6 +1491,12 @@ onBeforeUnmount(() => {
     <button class="ghost sm" @click="hintClosed = true">知道了</button>
   </div>
 
+  <div v-if="draftFound" class="draftbar">
+    <span>发现未完成的草稿：<b>{{ draftFound.title }}</b>（{{ draftFound.updated_at }}，{{ draftFound.blocks }} 个元素）。要继续吗？</span>
+    <button class="ghost sm" @click="useDraft">继续编辑</button>
+    <button class="ghost sm" @click="dropDraft">丢弃</button>
+  </div>
+
   <div class="writer wps" :class="{ 'left-off': !qOpen, 'focus-mode': true }">
 
     <div class="wtools">
@@ -1312,28 +1504,31 @@ onBeforeUnmount(() => {
       <button class="wt" :disabled="!activeDoc" title="放大并裁剪（框选题目或答案）" @click="openCrop"><Icon name="crop" /></button>
       <button class="wt" :class="{ on: drawer === 'formula' }" title="公式面板（上下标 / 分式 / 希腊字母）" @click="toggleTool('formula')"><Icon name="formula" /></button>
       <button class="wt" :class="{ on: drawer === 'struct' }" title="结构式（SMILES/MOL 出图，或手绘）" @click="toggleTool('struct')"><Icon name="structure" /></button>
-      <button class="wt" :class="{ on: drawer === 'subs' }" title="小问：加小问编号并插入画布" @click="toggleTool('subs')"><Icon name="subs" /></button>
-      <span class="wsep" />
-      <button class="wt" :disabled="answerBusy" :title="answerBusy ? 'AI 正在解题复核…' : 'AI 生成答案'" @click="genAnswer">
-        <Icon name="sparkle" />
-      </button>
       <span class="wsep" />
       <button class="wt" title="新建一题（清空画布）" @click="resetAll"><Icon name="newdoc" /></button>
       <span class="wsep" />
       <button class="wt" :disabled="!canUndo" title="撤销（Ctrl+Z）" @click="undo"><Icon name="undo" /></button>
       <button class="wt" :disabled="!canRedo" title="重做（Ctrl+Shift+Z）" @click="redo"><Icon name="redo" /></button>
       <span class="wsep" />
-      <button class="wt go" :disabled="saving" :title="editingQuestionId ? '更新题目' : '保存到题库'" @click="save">
+      <button class="wt go" :disabled="saving" :title="'保存：直接存进本地题库（要填出题人）'" @click="save">
         <Icon name="save" />
       </button>
+      <button class="wt" :disabled="saving" title="导出：先存进本地题库，再打开题库的打印页" @click="saveAndExport">
+        <Icon name="download" />
+      </button>
+      <span v-if="draftAt" class="draftat" title="出题过程自动留草稿，关掉页面也不会丢">草稿已存 {{ draftAt.slice(11) }}</span>
       <span class="wsp" />
       <div class="modesw">
         <button :class="{ on: editMode === 'canvas' }" @click="switchMode('canvas')">画布</button>
         <button :class="{ on: editMode === 'text' }" @click="switchMode('text')">单题</button>
+        <button :class="{ on: editMode === 'paper' }" title="整卷：新建整卷，录大题小问，导出题目卷+答案卷"
+                @click="switchMode('paper')">整卷</button>
       </div>
-      <span class="whint">{{ editMode === 'text'
-        ? '单题模式：纯文本 + 行内图，右下角实时预览 A4'
-        : (drawer ? '右侧面板打开时，画布会自动缩窄' : '点上方按钮在右侧打开工具面板') }}</span>
+      <span class="whint">{{ editMode === 'paper'
+        ? '整卷模式：新建整卷→录大题小问→导出题目卷+答案卷（要按题库勾题请去「组卷」）'
+        : (editMode === 'text'
+          ? '单题模式：纯文本 + 行内图，右下角实时预览 A4'
+          : (drawer ? '右侧面板打开时，画布会自动缩窄' : '点上方按钮在右侧打开工具面板')) }}</span>
     </div>
 
     <div class="wbody" v-show="editMode === 'canvas'">
@@ -1436,52 +1631,6 @@ onBeforeUnmount(() => {
     </aside>
 
 
-    <div v-if="false" class="xmask" @click.self="splitOpen = false">
-    <div class="xcard">
-      <div class="xhead">
-        <h3>AI 拆题</h3>
-        <button class="ghost sm" @click="splitOpen = false">关闭</button>
-      </div>
-      <p class="xnote">
-        放一份题目卷 PDF（可选再放一份答案卷），按「第 N 题」切开、同题号把答案配上去。
-        拆完可以「放进画布」直接排版，也可以整份入库。
-      </p>
-      <div class="xrow">
-        <label class="xfile"><span>题目卷</span><input type="file" accept=".pdf" @change="pickSplitFile($event, 'paper')" /></label>
-        <label class="xfile"><span>答案卷（可选）</span><input type="file" accept=".pdf" @change="pickSplitFile($event, 'answer')" /></label>
-        <button class="primary" :disabled="splitBusy || !splitPaper" @click="runSplit">
-          {{ splitBusy ? '拆题中…' : '开始拆题' }}
-        </button>
-      </div>
-      <p v-if="splitErr" class="xerr">{{ splitErr }}</p>
-      <p v-if="splitMsg" class="xok">{{ splitMsg }}</p>
-      <div v-if="splitItems.length" class="xlist">
-        <div v-for="(it, i) in splitItems" :key="i" class="xitem">
-          <div class="xi-h">
-            <b>第 {{ it.no }} 题</b>
-            <span v-if="it.title" class="xi-t">{{ it.title }}</span>
-            <span v-if="it.score" class="chip gray">{{ it.score }}</span>
-            <span class="chip" :class="{ gray: !it.answer }">{{ it.answer ? '有答案' : '无答案' }}</span>
-            <button class="ghost sm xi-go" @click="putSplit(it)">放进画布</button>
-          </div>
-          <div v-if="(it.crops || []).length" class="crops">
-            <span class="crops-tip">{{ it.crops.length }} 张截图（点图放大）</span>
-            <img v-for="(c, k) in it.crops" :key="k" :src="'/api/images/' + c" class="cropimg"
-                 :title="`第 ${it.no} 题 截图 ${k + 1}`" @click="previewCrop(c)" />
-          </div>
-          <p class="xi-s">{{ (it.stem || '').replace(/\s+/g, ' ').slice(0, 90) }}…</p>
-          <p v-if="it.answer" class="xi-a">答案：{{ it.answer.replace(/\s+/g, ' ').slice(0, 70) }}…</p>
-        </div>
-      </div>
-      <div v-if="splitItems.length" class="xfoot">
-        <span class="muted">整份入库到</span>
-        <select v-model="splitBook" class="xsel">
-          <option v-for="b in bookList" :key="b.id" :value="b.id">{{ b.title }}</option>
-        </select>
-        <button class="ghost" :disabled="splitBusy" @click="importSplit">全部入库</button>
-      </div>
-    </div>
-  </div>
   <div v-if="cropOpen" class="cropmask" @click.self="cropOpen = false">
       <div class="cropcard">
         <div class="crophead">
@@ -1547,7 +1696,28 @@ onBeforeUnmount(() => {
       </div>
       <div v-if="auxOpen" class="auxbody">
         <div class="aux">
-          <label class="f"><span>书册（入库位置）</span>
+          <label class="f req"><span>出题人 *</span>
+            <input v-model="form.author" placeholder="必填：入库后要能追到是谁出的" @change="rememberAuthor" />
+          </label>
+          <div class="cols2">
+            <label class="f"><span>专题（题库）</span>
+              <select v-model="form.topic">
+                <option value="organic">有机化学</option>
+                <option value="polymer">高分子化学</option>
+                <option value="crystal">晶体化学</option>
+                <option value="inorg-struct">无机综合与结构推断</option>
+                <option value="equation">方程式与元素化学</option>
+                <option value="thermo">热力学与化学平衡</option>
+                <option value="electro">电化学</option>
+                <option value="kinetics">动力学</option>
+                <option value="analytical">分析化学</option>
+              </select>
+            </label>
+            <label class="f"><span>年份（可空）</span>
+              <input v-model="form.year" type="number" min="1990" max="2100" placeholder="如 2024" />
+            </label>
+          </div>
+          <label class="f"><span>书册（本机标记，仅参考）</span>
             <select v-model="form.book_id">
               <option v-for="b in meta.books" :key="b.id" :value="b.id">{{ b.title }}</option>
             </select>
@@ -1651,19 +1821,23 @@ onBeforeUnmount(() => {
       <div class="ctabs">
         <button class="ctab" :class="{ on: ctab === 'q' }" @click="ctab = 'q'">📝 题目</button>
         <button class="ctab" :class="{ on: ctab === 'a' }" @click="ctab = 'a'">✅ 答案</button>
+        <button v-if="ctab === 'a'" class="ghost sm pad" title="把题目画布的内容整段垫到答案画布上面，然后在下面直接写解析"
+                @click="draftAnswerOnQuestion">↧ 把题目垫到上面</button>
         <span class="spacer" />
         <span class="muted">像浏览器标签页一样切换，两边内容各自保留</span>
       </div>
 
       <div class="cwrap" v-show="ctab === 'q'">
         <CanvasPane ref="qPane" title="题目画布" metaable :max-pages="1"
-                    hint="把右侧裁剪好的题目图拖进来，或点「＋ 文本」开始排版"
-                    @activate="activePane = 'q'" @changed="onPaneChanged('q')" />
+                    hint="把右侧裁剪好的题目图拖进来，或点「＋ 文本」开始排版；也能把电脑里的图片 / PDF 直接拖到这块画布上"
+                    @activate="activePane = 'q'" @changed="onPaneChanged('q')"
+                    @files="onCanvasFiles($event, 'q')" />
       </div>
       <div class="cwrap" v-show="ctab === 'a'">
         <CanvasPane ref="aPane" title="答案画布" :max-pages="2"
-                    hint="把右侧「裁剪到答案」的图拖进来，或用「＋ 文本」写解析"
-                    @activate="activePane = 'a'" @changed="onPaneChanged('a')" />
+                    hint="把右侧「裁剪到答案」的图拖进来，或用「＋ 文本」写解析；图片 / PDF 也能直接从电脑拖进来"
+                    @activate="activePane = 'a'" @changed="onPaneChanged('a')"
+                    @files="onCanvasFiles($event, 'a')" />
       </div>
     </section>
     </div>
@@ -1672,6 +1846,10 @@ onBeforeUnmount(() => {
       <TextMode ref="textRef" :question-id="Number(route.query.id || 0)"
                 :meta="{ books: meta.books, topics: meta.topics, qtypes: meta.qtypes }"
                 :seed="textSeed" @saved="onTextSaved" />
+    </div>
+
+    <div class="wbody pmode" v-show="editMode === 'paper'">
+      <div class="pmwrap"><ExamHome /></div>
     </div>
 
     <div v-if="pop.open" class="textpop" :style="{ left: pop.x + 'px', top: pop.y + 'px' }"
@@ -1719,9 +1897,6 @@ onBeforeUnmount(() => {
       </div>
     </div>
   </div>
-  <div v-if="cropPreview" class="zmask" @click.self="cropPreview = ''">
-    <img :src="cropPreview" class="zimg" />
-  </div>
 </template>
 
 <style scoped>
@@ -1748,8 +1923,6 @@ onBeforeUnmount(() => {
 .crops-tip { font-size: 12px; color: #94a3b8; }
 .cropimg { height: 130px; border: 1px solid var(--line); border-radius: 6px; cursor: zoom-in; background: #fff; box-shadow: 0 1px 3px rgba(15,23,42,.06); }
 .cropimg:hover { border-color: var(--brand); }
-.zmask { position: fixed; inset: 0; background: rgba(15,23,42,.55); display: flex; align-items: center; justify-content: center; z-index: 90; }
-.zimg { max-width: 92vw; max-height: 92vh; background: #fff; border-radius: 8px; }
 .xi-h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .xi-t { font-size: 12.5px; color: #334155; }
 .xi-go { margin-left: auto; }
@@ -1757,6 +1930,30 @@ onBeforeUnmount(() => {
 .xi-a { margin: 4px 0 0; font-size: 12px; color: #166534; line-height: 1.6; }
 .xfoot { display: flex; align-items: center; gap: 8px; padding: 10px 18px 16px; border-top: 1px dashed var(--line); position: sticky; bottom: 0; background: #fff; }
 .xsel { height: 30px; border: 1px solid var(--line); border-radius: 6px; font-size: 12px; padding: 0 8px; }
+.wbody.pmode { padding: 0; overflow: auto; }
+.pmwrap { padding: 18px 22px 40px; }
+.stepbar {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 8px;
+  background: #fff; border: 1px solid var(--line, #e7ebf2); border-radius: 12px;
+  padding: 6px 10px;
+}
+.draftbar { display: flex; align-items: center; gap: 10px; margin: 0 0 10px; padding: 8px 12px; border: 1px solid #ffe0a3; background: #fffaf0; border-radius: 10px; font-size: 13px; color: #7a5200; }
+.draftbar b { font-weight: 600; }
+.draftat { font-size: 11px; color: #98a2b3; margin-left: 8px; }
+.sbl { font-size: 12.5px; color: #6b7280; margin-right: 2px; }
+.stepbar .spacer { flex: 1; }
+.sbtn {
+  display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 12px;
+  border: 1px solid var(--line, #e7ebf2); background: #fff; color: #374151;
+  border-radius: 999px; font-size: 12.5px; cursor: pointer;
+}
+.sbtn b { display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 50%;
+  background: #eef2f7; color: #4b5563; font-size: 11px; }
+.sbtn.done { color: #1c8c46; border-color: #cfe9d8; background: #f4fbf6; }
+.sbtn.done b { background: #1c8c46; color: #fff; }
+.sbtn.on { color: #fff; background: var(--brand, #2563eb); border-color: var(--brand, #2563eb); }
+.sbtn.on b { background: rgba(255, 255, 255, .25); color: #fff; }
+
 .wtools {
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
   background: #fff; border: 1px solid var(--line, #e7ebf2); border-radius: 12px;
@@ -1953,6 +2150,8 @@ onBeforeUnmount(() => {
 .aux { display: flex; flex-direction: column; gap: 8px; }
 .f { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: #475467; }
 .f input, .f select, .f textarea { font-size: 13px; }
+.f.req span { color: #b42318; font-weight: 600; }
+.f.req input { border-color: #f0b4ae; background: #fffbfa; }
 .cols2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .tags { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip { border: 1px solid #dfe5ee; background: #fff; border-radius: 999px; padding: 3px 10px; font-size: 12px; color: #475467; cursor: pointer; }
@@ -1988,6 +2187,7 @@ onBeforeUnmount(() => {
 
 /* ---- 画布标签页 / 小问 ---- */
 .ctabs { display: flex; align-items: center; gap: 6px; margin: 2px 0 8px; }
+.ctabs .ghost.sm.pad { height: 26px; padding: 0 10px; font-size: 12.5px; }
 .ctab {
   display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 14px;
   border: 1px solid var(--line, #e7ebf2); border-bottom: none; background: #eef2f8; color: #475467;

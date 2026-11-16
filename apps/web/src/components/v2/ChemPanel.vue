@@ -1,6 +1,7 @@
 <script setup>
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api } from '../../api.js'
+import { extractFromFrame } from '../../ketcherSvg.js'
 
 const emit = defineEmits(['insert', 'close'])
 
@@ -72,13 +73,15 @@ function callKetcher(payload, timeout = 20000) {
 async function insertFromDraw() {
   busy.value = true; drawErr.value = ''
   try {
-    const get = await callKetcher({ type: 'ketcher:get' })
-    if (!get.ok) { drawErr.value = get.error || '取结构失败'; return }
-    if (get.empty) { drawErr.value = '画板是空的，先画一个结构'; return }
+    // 先读整块画布的 SVG：带反应箭头的结构 Ketcher 不肯存成 MOL，只能靠 SVG 保画面
+    const whole = extractFromFrame(frame.value)
+    const get = whole ? { ok: true, molfile: '', svg: '' } : await callKetcher({ type: 'ketcher:get' })
+    const svgPayload = (whole && whole.svg) || get.svg || ''
+    if (!svgPayload) { drawErr.value = get.error || '画板是空的，先画一个结构'; return }
     const r = await api.post('/api/v2/chem', {
-      kind: 'structure', molfile: get.molfile, svg: get.svg, renderer: 'ketcher',
+      kind: 'structure', molfile: get.molfile || null, svg: svgPayload, renderer: 'ketcher',
     })
-    emit('insert', { chemId: r.id, svg: r.svg || get.svg, molfile: get.molfile, smiles: '' })
+    emit('insert', { chemId: r.id, svg: svgPayload, molfile: get.molfile || '', smiles: '' })
   } catch (e) { drawErr.value = '插入失败：' + e.message } finally { busy.value = false }
 }
 

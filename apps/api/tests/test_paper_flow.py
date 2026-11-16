@@ -208,35 +208,6 @@ def test_ai_paper_generation_and_merge(monkeypatch):
         assert data["items"][1]["snapshot"]["stem"].startswith("2-1")
 
 
-def test_import_paper_with_chinese_filename(monkeypatch):
-    """整卷导入接受中文文件名，拆题结果进入题库并归入专题。"""
-    from fastapi.testclient import TestClient
-
-    from app.main import app
-    from app.services import ai as ai_svc
-
-    monkeypatch.setattr(ai_svc, "pdf_to_text", lambda path, max_pages=30: "第1题 测试\n答案：测试")
-    monkeypatch.setattr(ai_svc, "parse_paper", lambda db, text: {
-        "title": "中文卷", "questions": [{
-            "q_type": "简答", "stem": "请写出测试答案。", "answer": "测试", "analysis": "",
-            "knowledge_points": ["分析化学"], "score": 10,
-        }], "usage": {}, "model": "fake",
-    })
-
-    with TestClient(app) as c:
-        r = c.post(
-            "/api/import/paper?title=中文卷",
-            files={"file": ("中文试卷.pdf", b"%PDF-1.4\n", "application/pdf")},
-        )
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert body["title"] == "中文卷"
-        assert body["imported"] == 1
-    with SessionLocal() as db:
-        q = db.scalar(select(Question).where(Question.source_title == "中文卷"))
-        assert q is not None and q.q_type == "简答"
-
-
 def test_ai_free_gateway_preserves_paid_config():
     """切换本机免费模型不会丢掉已保存的付费 Key，且可以切回。"""
     from fastapi.testclient import TestClient
@@ -421,69 +392,41 @@ def test_ai_paper_preview_build_and_print_parts(monkeypatch):
             c.delete(f"/api/papers/{pid}")
 
 
-def test_import_papers_rejects_non_pdf():
+def test_removed_features_are_gone():
+    """整卷导入 / 本项目导入 / AI 拆题 / 错题集 已在二期里删掉，接口应当 404。"""
     from fastapi.testclient import TestClient
     from app.main import app
 
     with TestClient(app) as c:
-        r = c.post("/api/import/papers", files=[("files", ("a.txt", b"hello", "text/plain"))])
-        assert r.status_code == 400
-        assert "PDF" in r.json()["detail"]
+        # 注意：路由删掉后请求会落到末尾的 StaticFiles 挂载，POST 得到 405、GET 得到 404
+        gone = (404, 405)
+        assert c.post("/api/import/papers", files=[("files", ("a.txt", b"x", "text/plain"))]).status_code in gone
+        assert c.post("/api/wb/parse-preview").status_code in gone
+        assert c.post("/api/wb/parse-import", json={}).status_code in gone
+        assert c.post("/api/wb/extract").status_code in gone
+        assert c.get("/api/wb/wrongbooks").status_code in gone
+        assert c.get("/api/wb/wrongbooks/1/export").status_code in gone
+        # 留着的接口不能被误删
+        assert c.get("/api/wb/settings/persona").status_code == 200
 
 
-def test_import_multiple_pdfs(monkeypatch):
-    """题目卷 + 答案卷两份 PDF 一次导入：文字合并后交给 AI 拆题配对。"""
+def test_lan_guard_needs_code_from_other_machines():
+    """局域网访问码：别的机器没带码进不来，带了码能进；本机不受影响。"""
     from fastapi.testclient import TestClient
+
     from app.main import app
-    from app.services import ai
 
-    seen = {}
-
-    def fake_pdf(path, max_pages=30):
-        return f"TEXT {Path(path).name}"
-
-    def fake_parse(db, text):
-        seen["text"] = text
-        return {"title": "多文档测试卷", "questions": [{
-            "stem": "1-1 多文档题干", "answer": "配对答案", "analysis": "",
-            "q_type": "综合", "difficulty": 3, "knowledge_points": ["有机化学"], "score": 10,
-        }]}
-
-    monkeypatch.setattr(ai, "pdf_to_text", fake_pdf)
-    monkeypatch.setattr(ai, "parse_paper", fake_parse)
     with TestClient(app) as c:
-        r = c.post("/api/import/papers", files=[
-            ("files", ("题目卷.pdf", b"%PDF-1.4 fake", "application/pdf")),
-            ("files", ("答案卷.pdf", b"%PDF-1.4 fake", "application/pdf")),
-        ])
-        assert r.status_code == 200, r.text
-        data = r.json()
-        assert data["files"] == ["题目卷.pdf", "答案卷.pdf"]
-        assert "文档：题目卷.pdf" in seen["text"] and "文档：答案卷.pdf" in seen["text"]
-        assert data["imported"] == 1
-        # 清理
-        with SessionLocal() as db:
-            qs = db.scalars(select(Question).where(Question.source_title == "多文档测试卷")).all()
-            for q in qs:
-                db.delete(q)
-            book = db.scalar(select(Book).where(Book.title == "多文档测试卷"))
-            if book:
-                db.delete(book)
-            db.commit()
-
-
-def test_split_groups_subquestions_by_main_number():
-    from app.routers.workbench import _merge_by_main, _qnum_of
-
-    assert _qnum_of("1-1 已知") == 1
-    assert _qnum_of("第2题") == 2
-    assert _qnum_of("3. 合成") == 3
-    merged = _merge_by_main([
-        {"stem": "第1题 元素推断\n1-1 求 M", "answer": ""},
-        {"stem": "第2题 续\n1-3 写方程式", "answer": "A"},
-        {"stem": "第3题 有机\n2-1 画结构", "answer": "B"},
-    ])
-    assert len(merged) == 2
-    assert "1-1" in merged[0]["stem"] and "1-3" in merged[0]["stem"]
-    assert "第1题" in merged[0]["stem"] and "第2题" not in merged[0]["stem"]
-    assert merged[1]["stem"].startswith("第3题")
+        c.post("/api/lan/code", json={"code": "abc123"})
+    try:
+        with TestClient(app, client=("192.168.1.50", 51234)) as remote:
+            assert remote.get("/api/stats").status_code == 403
+            assert remote.get("/api/stats?c=abc123").status_code == 200
+            # 码记进 cookie 以后就不用再带
+            assert remote.get("/api/stats").status_code == 200
+            assert remote.get("/api/stats?c=wrong").status_code in (200, 403)
+        with TestClient(app) as local:
+            assert local.get("/api/stats").status_code == 200
+    finally:
+        with TestClient(app) as c:
+            c.post("/api/lan/code", json={"code": ""})

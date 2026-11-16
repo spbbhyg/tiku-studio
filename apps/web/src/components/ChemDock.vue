@@ -11,6 +11,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, nextTick } from 'vue'
 import katex from 'katex'
 import { api } from '../api'
+import { extractFromFrame } from '../ketcherSvg.js'
 
 const emit = defineEmits(['text', 'image'])
 
@@ -64,12 +65,16 @@ async function ksetFromSmiles() {
   kMsg.value = r.ok ? '已载入画板，可继续增删原子' : ('载入失败：' + (r.error || ''))
 }
 async function ktake() {
-  const r = await kpost({ type: 'ketcher:get' })
-  if (!r.ok || !r.molfile) { kMsg.value = '画板里还没有结构'; return }
+  // 先读整块画布的 SVG：Ketcher 拒绝把带反应箭头的结构存成 MOL，
+  // 只靠 molfile 会让"画了箭头就取不出图"，这正是用户报的 bug。
+  const whole = extractFromFrame(kframe.value)
+  const r = whole ? { ok: true, molfile: '' } : await kpost({ type: 'ketcher:get' })
+  const svgPayload = (whole && whole.svg) || r.svg || ''
+  if (!svgPayload) { kMsg.value = '画板里还没有结构'; return }
   kMsg.value = '正在生成图…'
   try {
     const res = await api.post('/api/v2/chem', {
-      kind: 'structure', molfile: r.molfile, svg: r.svg || '', renderer: 'ketcher',
+      kind: 'structure', molfile: r.molfile || null, svg: svgPayload, renderer: 'ketcher',
     })
     if (!res || !res.id) throw new Error('没有拿到结构对象')
     const png = await api.post(`/api/v2/chem/${res.id}/png`, {})

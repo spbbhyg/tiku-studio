@@ -1,7 +1,7 @@
 <script setup>
 // 题面渲染器：一份 doc，两种外壳（card 题库卡片 / a4 出题页预览）。
 // 段落 / 行内图 / 表 / 公式的渲染只写这一份，两种外壳只包不同 CSS。
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { renderInline, renderParas } from '../mathx.js'
 
 const props = defineProps({
@@ -9,7 +9,11 @@ const props = defineProps({
   variant: { type: String, default: 'card' },   // card | a4
   showAnswers: { type: Boolean, default: false },
   answersOpen: { type: Boolean, default: false },
+  // 单题模式专用：A4 上的图片/表格可以用鼠标拖位置、拉宽窄（文字仍自动排版）
+  interactive: { type: Boolean, default: false },
+  layout: { type: Object, default: () => ({}) },
 })
+const emit = defineEmits(['update:layout'])
 
 const meta = computed(() => props.doc.meta || {})
 const suffix = computed(() => {
@@ -65,6 +69,65 @@ function imgStyle(o) {
     marginRight: al === 'left' || al === 'center' ? 'auto' : '0',
   }
 }
+// ---------------------------------------------------------------- A4 上的可拖动插图
+// 只改"视觉位置"：图仍占原来的行高（文字不会被挤乱），拖动是给它加一层 transform 偏移。
+const editKey = ref('')
+function lay(k) { return (props.layout && props.layout[k]) || {} }
+function offStyle(k) {
+  const o = lay(k)
+  return {
+    transform: o.dx || o.dy ? `translate(${o.dx || 0}px, ${o.dy || 0}px)` : 'none',
+    outline: editKey.value === k ? '1px dashed #2f6fed' : 'none',
+    cursor: 'grab',
+    position: 'relative',
+    zIndex: editKey.value === k ? 6 : 2,
+  }
+}
+function figStyle(k, im) {
+  const o = lay(k)
+  const st = imgStyle(im)
+  if (o.w) { st.width = o.w + 'pt'; st.maxWidth = '100%' }
+  return { ...st, ...offStyle(k) }
+}
+function patch(k, v) {
+  const next = { ...(props.layout || {}) }
+  next[k] = { ...(next[k] || {}), ...v }
+  emit('update:layout', next)
+}
+
+let drag = null
+function onFigDown(e, k) {
+  if (!props.interactive) return
+  e.preventDefault()
+  editKey.value = k
+  const o = lay(k)
+  drag = { k, x: e.clientX, y: e.clientY, dx: o.dx || 0, dy: o.dy || 0 }
+  window.addEventListener('pointermove', onFigMove)
+  window.addEventListener('pointerup', onFigUp, { once: true })
+}
+function onFigMove(e) {
+  if (!drag) return
+  patch(drag.k, { dx: Math.round(drag.dx + e.clientX - drag.x), dy: Math.round(drag.dy + e.clientY - drag.y) })
+}
+function onFigUp() {
+  drag = null
+  window.removeEventListener('pointermove', onFigMove)
+}
+// 滚轮在图上调宽窄（按住 shift 更细）
+function onFigWheel(e, k) {
+  if (!props.interactive || editKey.value !== k) return
+  e.preventDefault()
+  const cur = lay(k).w || (e.currentTarget.offsetWidth * 72 / 96)
+  const step = e.shiftKey ? 4 : 12
+  patch(k, { w: Math.max(40, Math.round(cur - Math.sign(e.deltaY) * step)) })
+}
+function resetFig(k) {
+  if (!props.interactive) return
+  const next = { ...(props.layout || {}) }
+  delete next[k]
+  emit('update:layout', next)
+  editKey.value = ''
+}
 const allAnswers = computed(() => subs.value.some((s) => s.answer || s.points.length || s.answerImgs.length))
 </script>
 
@@ -78,8 +141,11 @@ const allAnswers = computed(() => subs.value.some((s) => s.answer || s.points.le
 
     <template v-for="(b, i) in stemBlocks" :key="'b' + i">
       <p v-if="b.t === 'p'" class="bp" v-html="renderInline(b.text || '')" />
-      <figure v-else-if="b.t === 'img'" class="bimg">
-        <img :src="imgUrl(b.path)" :style="imgStyle(b)" loading="lazy" />
+      <figure v-else-if="b.t === 'img'" class="bimg" :class="{ edit: interactive }">
+        <img :src="imgUrl(b.path)" :style="figStyle('stem:' + i, b)" loading="lazy"
+             @pointerdown="onFigDown($event, 'stem:' + i)"
+             @wheel="onFigWheel($event, 'stem:' + i)"
+             @dblclick="resetFig('stem:' + i)" />
         <figcaption v-if="showCap(b.caption)">{{ b.caption }}</figcaption>
       </figure>
       <table v-else-if="b.t === 'table'" class="btable">
@@ -102,8 +168,11 @@ const allAnswers = computed(() => subs.value.some((s) => s.answer || s.points.le
           <span class="sc2" v-if="s.score && variant === 'a4'">{{ s.score }} 分</span>
         </div>
         <p v-for="(p, j) in s.paras" :key="j" class="bp" v-html="p" />
-        <figure v-for="(im, j) in s.imgs" :key="'i' + j" class="bimg">
-          <img :src="imgUrl(im.path || im)" :style="imgStyle(im)" loading="lazy" />
+        <figure v-for="(im, j) in s.imgs" :key="'i' + j" class="bimg" :class="{ edit: interactive }">
+          <img :src="imgUrl(im.path || im)" :style="figStyle('sub:' + i + ':' + j, im)" loading="lazy"
+               @pointerdown="onFigDown($event, 'sub:' + i + ':' + j)"
+               @wheel="onFigWheel($event, 'sub:' + i + ':' + j)"
+               @dblclick="resetFig('sub:' + i + ':' + j)" />
           <figcaption v-if="showCap(im.caption)">{{ im.caption }}</figcaption>
         </figure>
         <div v-if="showAnswers && (s.answer || s.points.length || s.answerImgs.length)" class="ans">
@@ -154,6 +223,8 @@ const allAnswers = computed(() => subs.value.some((s) => s.answer || s.points.le
 .sc2 { font-size: 11px; color: #9ca3af; }
 .qs.v-a4 .sc2 { display: none; }
 .bimg { margin: 4pt 0; text-align: center; break-inside: avoid; }
+.bimg.edit img { touch-action: none; user-select: none; }
+.bimg.edit img:hover { outline: 1px dashed #98a2b3; }
 .bimg img, .qs img { display: block; max-width: 100%; height: auto; }
 .qs.v-card img { max-height: 300px; width: auto; max-width: 100%; }
 .qs.v-card .bimg img { max-height: 260px; }

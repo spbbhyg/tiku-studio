@@ -13,14 +13,17 @@ import os
 import threading
 
 from fastapi import FastAPI
+from fastapi import Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .config import WEB_DIST, ensure_dirs
 from .db import SessionLocal, init_db
-from .routers import (workbench, wb_extra, wb_split, ai as ai_router, authoring, books, exam, github_sync,
-                      imports, inbox, manual, meta, paper_canvas, papers, questions, sets,
+from .routers import (workbench, wb_extra, lan, update as update_router, ai as ai_router, authoring, books, exam, github_sync,
+                      manual, meta, paper_canvas, papers, questions, sets,
                       settings as settings_router, v2 as v2_router, reader,
+                      chemy as chemy_router, convert as convert_router, drafts as drafts_router, compose as compose_router,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -35,25 +38,49 @@ app = FastAPI(
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
 
+
+@app.middleware("http")
+async def lan_guard(request: Request, call_next):
+    """局域网访问码：设了码以后，非本机请求要带一次 ?c=码（之后用 cookie 记住）。"""
+    try:
+        code = lan.current_code()
+    except Exception:                     # noqa: BLE001
+        code = ""
+    if code:
+        host = request.client.host if request.client else "127.0.0.1"
+        if host not in ("127.0.0.1", "::1", "localhost", "testclient"):
+            got = request.query_params.get("c") or request.cookies.get("lan_code") or ""
+            if got != code:
+                return JSONResponse({"detail": "这个地址需要访问码：问一下发链接的老师"}, status_code=403)
+            resp = await call_next(request)
+            if got and not request.cookies.get("lan_code"):
+                resp.set_cookie("lan_code", code, max_age=7 * 24 * 3600, samesite="lax")
+            return resp
+    return await call_next(request)
+
 app.include_router(books.router)
 app.include_router(v2_router.router)
 app.include_router(reader.router)
 app.include_router(questions.router)
 app.include_router(papers.router)
 app.include_router(paper_canvas.router)
-app.include_router(inbox.router)
 app.include_router(meta.router)
 app.include_router(manual.router)
 app.include_router(authoring.router)
-app.include_router(imports.router)
 app.include_router(sets.router)
 app.include_router(settings_router.router)
 app.include_router(workbench.router)
-app.include_router(wb_split.router)
 app.include_router(wb_extra.router)
 app.include_router(ai_router.router)
 app.include_router(exam.router)
 app.include_router(github_sync.router)
+# 本地题库（D:\化学竞赛题库）接入层：只走 HTTP，读写都通过题库自己的接口
+app.include_router(chemy_router.router)
+app.include_router(drafts_router.router)
+app.include_router(compose_router.router)
+app.include_router(convert_router.router)
+app.include_router(lan.router)
+app.include_router(update_router.router)
 
 
 @app.on_event("startup")
@@ -85,6 +112,31 @@ def startup() -> None:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("内置免费模型启动失败：%s", exc)
         threading.Thread(target=_boot_ofm, daemon=True, name="ofm-boot").start()
+
+    # 安装版自带题库：装好后不用手动开题库，这里在后台确认一次，没起来就拉起来
+    def _boot_chemy() -> None:
+        try:
+            from .services import chemy_client
+            try:
+                if chemy_client.health():
+                    return
+            except Exception:  # noqa: BLE001 没起来就是「要拉起」，不必区分原因
+                pass
+            exe = chemy_router._chemy_exe()          # noqa: SLF001 与「启动题库」按钮同一套路径
+            if not os.path.exists(exe):
+                logger.info("没有随包的题库程序，跳过自动启动：%s", exe)
+                return
+            import subprocess
+            flags = 0
+            for name, val in (("DETACHED_PROCESS", 0x00000008), ("CREATE_NEW_PROCESS_GROUP", 0x00000200)):
+                flags |= getattr(subprocess, name, val)
+            subprocess.Popen([exe], cwd=os.path.dirname(exe), creationflags=flags,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            logger.info("已拉起随包题库：%s", exe)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("自动启动题库失败（不影响出题）：%s", exc)
+
+    threading.Thread(target=_boot_chemy, daemon=True, name="chemy-boot").start()
 
 
 if WEB_DIST.exists():

@@ -12,13 +12,13 @@ function toggleNav() {
 const navs = [
   { path: '/', label: '首页' },
   { path: '/author', label: '出题' },
-  { path: '/reader', label: '精读' },
-  { path: '/smart', label: '智能出题' },
-  { path: '/questions', label: '题库' },
+  { path: '/drafts', label: '草稿' },
+  { path: '/bank', label: '题库' },
+  { path: '/compose', label: '组卷' },
   { path: '/exam', label: '出整卷' },
-  { path: '/ingest', label: '整卷导入' },
+  { path: '/convert', label: '格式转换' },
+  { path: '/ai', label: 'AI 工作台' },
   { path: '/papers', label: '试卷' },
-  { path: '/wrong', label: '错题集' },
   { path: '/settings', label: '设置' },
 ]
 </script>

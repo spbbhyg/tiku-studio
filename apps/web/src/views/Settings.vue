@@ -6,7 +6,37 @@ import AiQuota from '../components/AiQuota.vue'
 import TagsAdmin from './TagsAdmin.vue'
 import { ACTIONS, comboOf, defaults, loadShortcuts, saveShortcuts } from '../shortcuts.js'
 
-const tab = ref('general')          // general | ai | keys | cats | persona
+const tab = ref('general')          // general | export | ai | keys | cats | tags | persona | guide
+
+// ---------------------------------------------------------------- 导出选项
+const exp = reactive({
+  font_size: 10.5, line_height: 1.5, margin_lr: 2.0, margin_tb: 1.8,
+  numbering: 'arabic', scores: true, answers: 'end', footer: '',
+})
+const expBusy = ref(false)
+const expMsg = ref('')
+
+async function loadExport() {
+  try {
+    const d = await api.get('/api/settings/export')
+    Object.assign(exp, d || {})
+  } catch (e) { /* 设置读不到就用默认值 */ }
+}
+
+async function saveExport() {
+  expBusy.value = true
+  expMsg.value = ''
+  try {
+    const r = await api.put('/api/settings/export', { opts: { ...exp } })
+    Object.assign(exp, r.opts || {})
+    expMsg.value = '已保存：组卷页导出 PDF / Word 会按这里的设置排版'
+  } catch (e) { expMsg.value = e.message || String(e) } finally { expBusy.value = false }
+}
+
+async function resetExport() {
+  Object.assign(exp, { font_size: 10.5, line_height: 1.5, margin_lr: 2.0, margin_tb: 1.8, numbering: 'arabic', scores: true, answers: 'end', footer: '' })
+  await saveExport()
+}
 const helpOpen = ref(false)
 
 const persona = ref({ name: '小卷', tone: '', greeting: '' })
@@ -311,6 +341,7 @@ const ghOwner = ref('')
 const ghRepo = ref('')
 const ghMirror = ref('')
 const ghDrafts = ref(false)
+const ghForce = ref(false)
 
 async function loadGh() {
   try {
@@ -353,10 +384,10 @@ async function ghClearToken() {
 
 async function ghPublish() {
   const n = ghDrafts.value ? gh.value.local.confirmed + gh.value.local.drafts : gh.value.local.confirmed
-  if (!confirm(`把 ${n} 道题发布到 ${ghOwner.value}/${ghRepo.value}？\n发布后会追加一个新包，别人点「一键更新」就能拿到。`)) return
+  if (!confirm(`把 ${n} 道题发布到 ${ghOwner.value}/${ghRepo.value}？\n发布后会追加一个新包，别人点「一键更新」就能拿到。` + (ghForce.value ? '\n\n已勾选「重新发布全部」：会忽略本机的发布记录，把当前所有题目重新推一遍。' : ''))) return
   ghBusy.value = 'publish'; ghErr.value = ''; ghMsg.value = ''
   try {
-    const r = await api.post('/api/github/publish', { include_drafts: ghDrafts.value })
+    const r = await api.post('/api/github/publish', { include_drafts: ghDrafts.value, force: ghForce.value })
     await loadGh()
     ghMsg.value = `已发布第 ${r.seq} 包：${r.questions} 题、${r.images} 张图（${(r.bytes / 1048576).toFixed(2)} MB）`
   } catch (e) { ghErr.value = e.message || String(e) } finally { ghBusy.value = '' }
@@ -371,8 +402,71 @@ async function ghPull() {
   } catch (e) { ghErr.value = e.message || String(e) } finally { ghBusy.value = '' }
 }
 
+// ---------------------------------------------------------------- 局域网共备
+const lan = reactive({ hosts: [], urls: [], code: '', codeSet: false, busy: '', msg: '', err: '', copied: '' })
+async function loadLan() {
+  try {
+    const r = await api.get('/api/lan/info')
+    lan.hosts = r.hosts || []
+    lan.urls = r.urls || []
+    lan.codeSet = !!r.code_set
+    lan.code = r.code || ''
+  } catch (e) { lan.err = e.message || String(e) }
+}
+async function saveLanCode(code) {
+  lan.busy = 'code'; lan.err = ''; lan.msg = ''
+  try {
+    await api.post('/api/lan/code', { code })
+    await loadLan()
+    lan.msg = code ? '已设访问码：同事第一次打开链接要输这串码，之后浏览器会记住' : '已关掉访问码：同一网络里谁都能打开'
+  } catch (e) { lan.err = e.message || String(e) } finally { lan.busy = '' }
+}
+async function copyText(t, tag) {
+  try {
+    await navigator.clipboard.writeText(t)
+    lan.copied = tag
+    setTimeout(() => { if (lan.copied === tag) lan.copied = '' }, 1500)
+  } catch (e) { lan.err = '复制不了，手动选中吧：' + t }
+}
+
+// ---------------------------------------------------------------- 软件更新
+const up = reactive({ cur: '', latest: '', has: false, notes: '', page: '', zip: null,
+                      busy: '', err: '', msg: '', pending: null })
+async function checkUpdate() {
+  up.busy = 'check'; up.err = ''; up.msg = ''
+  try {
+    const r = await api.get('/api/update/check')
+    if (r.ok === false) throw new Error(r.error || '查不到')
+    up.cur = r.current; up.latest = r.latest; up.has = !!r.has_update
+    up.notes = r.notes || ''; up.page = r.page || ''; up.zip = r.zip || null
+    up.msg = r.has_update ? `发现新版本 ${r.latest}` : (r.note || '已经是最新版了')
+  } catch (e) { up.err = e.message || String(e) } finally { up.busy = '' }
+}
+async function downloadUpdate() {
+  up.busy = 'dl'; up.err = ''; up.msg = '正在下载…（安装包有点大，等一会儿）'
+  try {
+    const r = await api.post('/api/update/download', {})
+    up.msg = `已下载 ${r.tag}（${r.files} 个文件），下一步点「应用并重启」`
+    await loadUpdateStatus()
+  } catch (e) { up.err = e.message || String(e); up.msg = '' } finally { up.busy = '' }
+}
+async function applyUpdate() {
+  if (!window.confirm('应用更新会关闭软件、覆盖文件、再自动打开。现在保存好手上的活，继续吗？')) return
+  up.busy = 'apply'; up.err = ''
+  try {
+    const r = await api.post('/api/update/apply', {})
+    up.msg = r.note || '更新脚本已启动'
+  } catch (e) { up.err = e.message || String(e) } finally { up.busy = '' }
+}
+async function loadUpdateStatus() {
+  try { up.pending = (await api.get('/api/update/status')).pending } catch { up.pending = null }
+}
+
 onMounted(() => {
   load()
+  loadLan()
+  loadUpdateStatus()
+  loadExport()
   loadStore()
   loadAi()
   loadGh()
@@ -391,6 +485,213 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
     <button class="tab" :class="{ on: tab === 'cats' }" @click="tab = 'cats'">分类</button>
     <button class="tab" :class="{ on: tab === 'tags' }" @click="tab = 'tags'">标签管理</button>
     <button class="tab" :class="{ on: tab === 'persona' }" @click="tab = 'persona'">AI 助手</button>
+    <button class="tab" :class="{ on: tab === 'export' }" @click="tab = 'export'">导出</button>
+    <button class="tab" :class="{ on: tab === 'lan' }" @click="tab = 'lan'">局域网</button>
+    <button class="tab" :class="{ on: tab === 'update' }" @click="tab = 'update'">软件更新</button>
+    <button class="tab" :class="{ on: tab === 'guide' }" @click="tab = 'guide'">上手指引</button>
+  </div>
+
+
+  <!-- 上手指引 -->
+  <!-- 局域网共备 -->
+  <div v-if="tab === 'lan'" class="card">
+    <h3>局域网共备</h3>
+    <p class="muted" style="margin:4px 0 10px">
+      软件本身就是个本机服务，同一网络的同事用浏览器打开下面的地址，看到的就是<b>同一份数据</b>：
+      能看你出的草稿、能一起在「组卷」里勾题、导出的 Word/PDF 也都能直接拿走。不用装客户端。
+    </p>
+    <div v-if="!lan.hosts.length" class="warnbox">没查到局域网地址：确认这台机器连着路由器/交换机（或者先关掉虚拟网卡再试）。</div>
+    <div v-else class="lanlist">
+      <div v-for="(u, i) in lan.urls" :key="u" class="rownow" style="margin-top:8px">
+        <span class="lbl">发给同事</span>
+        <code class="path">{{ u }}</code>
+        <button class="ghost sm" @click="copyText(u, 'u' + i)">{{ lan.copied === 'u' + i ? '已复制' : '复制' }}</button>
+      </div>
+      <p class="muted" style="margin:8px 0 0; font-size:12.5px">
+        同事的电脑要跟你在同一个网络里（同一个 WiFi / 同一个路由器）。Windows 第一次可能会弹「是否允许访问网络」，选允许。
+      </p>
+    </div>
+
+    <h3 style="margin-top:18px">访问码</h3>
+    <p class="muted" style="margin:4px 0 10px">
+      办公室人多时建议设一个：设了以后，别人第一次打开链接要输这串码（只用字母和数字），浏览器会记住 7 天。
+    </p>
+    <div class="rownow">
+      <input v-model="lan.code" class="pathinput" maxlength="8" placeholder="例如 6537，留空=不设码" />
+      <button class="primary" :disabled="lan.busy === 'code'" @click="saveLanCode(lan.code.trim())">
+        {{ lan.busy === 'code' ? '保存中…' : '保存访问码' }}
+      </button>
+      <button class="ghost" :disabled="lan.busy === 'code' || !lan.codeSet" @click="lan.code = ''; saveLanCode('')">关掉访问码</button>
+    </div>
+    <p v-if="lan.codeSet" class="chip brand" style="margin-top:8px">当前已启用访问码</p>
+    <p v-if="lan.msg" class="okbox">{{ lan.msg }}</p>
+    <p v-if="lan.err" class="errbox">{{ lan.err }}</p>
+  </div>
+
+  <!-- 软件更新 -->
+  <div v-if="tab === 'update'" class="card">
+    <h3>软件更新</h3>
+    <p class="muted" style="margin:4px 0 10px">
+      从 GitHub 上的发布页拉最新版（仓库 <code>spbbhyg/tiku-studio</code>）。查版本与下载都不需要登录，
+      点了就会自己下载、解包、覆盖、重启。
+    </p>
+    <div class="rownow">
+      <span class="lbl">当前版本</span>
+      <code>{{ up.cur || '—' }}</code>
+      <button class="primary" :disabled="!!up.busy" @click="checkUpdate">{{ up.busy === 'check' ? '检查中…' : '检查更新' }}</button>
+      <a v-if="up.page" :href="up.page" target="_blank" class="ghost sm" style="display:inline-flex;align-items:center">打开发布页</a>
+    </div>
+    <p v-if="up.latest" class="muted" style="margin-top:8px">最新版本：<b>{{ up.latest }}</b><span v-if="up.has" class="chip brand" style="margin-left:6px">有新版本</span></p>
+    <p v-if="up.msg" class="okbox">{{ up.msg }}</p>
+    <p v-if="up.err" class="errbox">{{ up.err }}</p>
+    <pre v-if="up.notes" class="notes">{{ up.notes }}</pre>
+    <div v-if="up.has" class="rownow" style="margin-top:10px">
+      <button class="primary" :disabled="!!up.busy || !up.zip" @click="downloadUpdate">
+        {{ up.busy === 'dl' ? '下载中…' : '下载更新' }}
+      </button>
+      <button class="ghost" :disabled="!!up.busy || !up.pending" @click="applyUpdate">应用并重启</button>
+      <span v-if="!up.zip" class="muted" style="font-size:12.5px">这个版本没带 zip 包，去发布页手动下载</span>
+    </div>
+    <p v-if="up.pending" class="muted" style="margin-top:10px">
+      已下载待应用：<b>{{ up.pending.tag }}</b>（{{ up.pending.at }}）。点「应用并重启」后别再动鼠标，等它自己回来。
+    </p>
+    <p class="muted" style="margin-top:14px; font-size:12.5px">
+      网络不通就手动更新：去 <code>github.com/spbbhyg/tiku-studio/releases</code> 下 zip，解压覆盖安装目录即可，数据在 <code>data/</code> 里不会被动。
+    </p>
+  </div>
+
+  <div v-if="tab === 'guide'" class="card guide">
+    <h3>五分钟上手</h3>
+    <p class="lead">
+      这套软件只做三件事：<b>出题</b>（把文献里的题裁进画布、排好版）、<b>存题</b>（存进你本机的化学竞赛题库）、
+      <b>组卷</b>（从题库挑题，排成 A4 试卷，导出 PDF / Word 发给学生）。
+      所有数据都在你自己电脑上，不联网也能用。
+    </p>
+
+    <div class="g2">
+      <div>
+        <h4>开始前先确认两件事</h4>
+        <ol class="steps">
+          <li><b>题库在跑</b>：打开「题库」页，顶上显示「v1.0.2 · 204 题」就对了。没显示就点页面里的「启动题库」；
+            还不行就手动双击题库文件夹里的 <code>chemy.exe</code>。</li>
+          <li><b>填出题人</b>：出题页右下角「入库信息」里的<b>出题人</b>是必填的。存进题库的每道题都会带上
+            「出题人：你的名字」这个标签，以后才知道是谁出的。</li>
+        </ol>
+      </div>
+      <div>
+        <h4>三条最常用的路</h4>
+        <table class="route">
+          <tr><td class="k">出单题</td><td>出题 → 画布 / 单题</td></tr>
+          <tr><td class="k">出一整卷</td><td>组卷 → 勾题 → 导出</td></tr>
+          <tr><td class="k">翻题库</td><td>题库 → 搜索 / 按专题翻</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <h4>一、出题：把文献里的题变成画布上的版面</h4>
+    <p>出题页左边是画布，右边是工具面板。顶部有一条「出题四步」：</p>
+    <ol class="steps">
+      <li><b>导入文献</b>：点工具栏的 PDF 按钮，或者直接把 PDF 拖到画布上。右边会显示原页面。</li>
+      <li><b>裁图排版</b>：在右边页面上按住拖一个框 →「放大并裁剪」→ 图就进画布了。
+        图可以拖着摆位置、拉四角改大小；按住 <kbd>Shift</kbd> 点多个元素可以一起选。</li>
+      <li><b>写答案</b>：切到「答案」标签，点「↧ 把题目垫到上面」，题目会<b>整块</b>垫在答案画布顶部（已组合，可整体拖），
+        你在它下面直接写解析就行，不用再把题目复制一遍。</li>
+      <li><b>收入题库</b>：点右上角的保存按钮（软盘图标）。题目会直接进本地题库，不再存本软件自己的库。</li>
+    </ol>
+    <p class="tip2">
+      画布上的小技巧：<b>上色要先选字</b>（拖选中一段文字，再点上面那排色块，立刻变色）；
+      <b>组合</b>=选中多个后点组合按钮，之后拖一个就是拖整组、拆分也按整组拆；
+      <b>撤销/重做</b>在工具栏中间那两个箭头，最多 60 步。
+    </p>
+
+    <h4>二、组卷：勾题 → A4 预览 → 导出</h4>
+    <ol class="steps">
+      <li>「组卷」页左边按专题浏览题库，或输入关键词跨专题搜；点一行就收进卷子。</li>
+      <li>中间是真实 A4 预览：勾一道立刻重排，看到的就是印出来的样子。</li>
+      <li>右边填卷名、学校、命题人；页脚留空就自动印「第 X 页 共 Y 页」。</li>
+      <li>「导出 PDF」拿去打印，「导出 Word」拿去改。字体、行距、题号样式在
+        <b>设置 → 导出</b>里统一改。</li>
+    </ol>
+
+    <h4>三、题库：不用离开软件</h4>
+    <p>
+      「题库」页就是把题库自己的界面嵌进来了，和单独打开题库一模一样：搜索、按专题翻、勾选、
+      导入（粘贴 / docx / pdf）、看答案、打印。这里做的任何改动都直接落在题库文件上，
+      所以它是所有题目的唯一出处——本软件不再自己存一份。
+    </p>
+
+    <h4>四、出到一半关掉页面也不会丢</h4>
+    <p>
+      出题时每 3 秒自动留一份草稿。重新打开出题页，顶部会提示「发现未完成的草稿（时间，N 个元素），要继续吗？」；
+      也可以去「草稿」页，那里列着所有没写完的题，能继续写或删掉。点保存进题库后草稿自动清掉。
+    </p>
+
+    <h4>五、格式转换</h4>
+    <p>
+      「格式转换」页：Word 拖左边出 PDF，PDF 拖右边出 Word。都在本地转；装了 LibreOffice 会用它对版式更准，
+      没装就用内置渲染（版式近似但文字、图片、表格都在）。
+    </p>
+
+    <h4>快捷键</h4>
+    <table class="keys">
+      <tr><td><kbd>Ctrl</kbd> + <kbd>S</kbd></td><td>保存（存进题库）</td></tr>
+      <tr><td><kbd>Ctrl</kbd> + <kbd>Z</kbd> / <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Z</kbd></td><td>撤销 / 重做</td></tr>
+      <tr><td><kbd>Ctrl</kbd> + <kbd>C</kbd> / <kbd>V</kbd></td><td>复制 / 粘贴选中的画布元素</td></tr>
+      <tr><td><kbd>Delete</kbd></td><td>删掉选中的元素</td></tr>
+      <tr><td>双击文字块</td><td>改文字；编辑时拖选文字再点色块，只给这几个字上色</td></tr>
+      <tr><td>双击图片</td><td>（单题预览里）把图的位置复位</td></tr>
+    </table>
+
+    <h4>常见问题</h4>
+    <dl class="faq">
+      <dt>题库显示「连不上」</dt>
+      <dd>先点「启动题库」；还不行就手动运行题库的 <code>chemy.exe</code>，等它窗口里出现 8080 再回来点「重试连接」。</dd>
+      <dt>导出 Word 里页码是「1」不变</dt>
+      <dd>Word 打开后按 <kbd>Ctrl</kbd> + <kbd>A</kbd> 再 <kbd>F9</kbd> 更新域；或者直接打印，打印时会自动更新。</dd>
+      <dt>结构式里有反应箭头，插图后箭头没了</dt>
+      <dd>已经修好：现在取结构式时整块画板（含箭头、文字、加号）一起出图，不再依赖 molfile。</dd>
+      <dt>题目的分类和专题对不上</dt>
+      <dd>分类完全跟着本地题库走。要改分类，去题库页改，本软件这边是以题库为准的。</dd>
+    </dl>
+  </div>
+
+  <!-- 导出选项 -->
+  <div v-if="tab === 'export'" class="card">
+    <h3>导出卷子的默认样子</h3>
+    <p class="muted" style="margin:4px 0 12px">
+      这里的设置会用在「组卷」页导出的 PDF 与 Word 上；单题从题库导出时走题库自己的打印页。
+    </p>
+    <div class="exgrid">
+      <label>正文字号（磅）<input v-model.number="exp.font_size" type="number" step="0.5" min="8" max="14" /></label>
+      <label>行距（倍）<input v-model.number="exp.line_height" type="number" step="0.1" min="1" max="2.5" /></label>
+      <label>左右页边距（cm）<input v-model.number="exp.margin_lr" type="number" step="0.1" min="1" max="4" /></label>
+      <label>上下页边距（cm）<input v-model.number="exp.margin_tb" type="number" step="0.1" min="1" max="4" /></label>
+      <label>题号样式
+        <select v-model="exp.numbering">
+          <option value="arabic">阿拉伯数字：1. 2. 3.</option>
+          <option value="cn">中文数字：第一题 第二题</option>
+        </select>
+      </label>
+      <label>答案怎么放
+        <select v-model="exp.answers">
+          <option value="end">答案单独成卷（默认）</option>
+          <option value="inline">每道题后面紧跟答案</option>
+          <option value="none">不出答案</option>
+        </select>
+      </label>
+      <label class="wide">默认页脚
+        <input v-model="exp.footer" placeholder="留空＝第 {page} 页 共 {pages} 页" />
+      </label>
+      <label class="chk"><input v-model="exp.scores" type="checkbox" /> 题号后面标分值</label>
+    </div>
+    <div class="exact">
+      <button class="primary" :disabled="expBusy" @click="saveExport">保存导出设置</button>
+      <button class="ghost" :disabled="expBusy" @click="resetExport">恢复默认</button>
+      <span v-if="expMsg" class="muted">{{ expMsg }}</span>
+    </div>
+    <p class="muted" style="margin-top:10px">
+      能用占位符：<code>{page}</code> 页码、<code>{pages}</code> 总页数。导成 Word 时它们是 Word 的页码域，打印前会自动更新。
+    </p>
   </div>
 
   <!-- 常规 -->
@@ -427,8 +728,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
     <p v-if="restarting" class="warnbox">正在重启服务，页面稍后会自动恢复…</p>
     <h3>当前数据</h3>
     <p v-if="stats" class="muted" style="margin:4px 0">
-      书册 {{ stats.books }} 个 · 题目 {{ stats.questions }} 道（已确认 {{ stats.confirmed_questions }}、
-      草稿 {{ stats.draft_questions }}）· 试卷 {{ stats.papers }} 张
+      试卷 {{ stats.papers }} 张 · 组卷用到的题目都在本地题库里（<a href="#/bank">题库</a>那一页）
     </p>
     <h3>存储清理</h3>
     <p class="muted" style="margin:4px 0 10px">
@@ -449,6 +749,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
     </div>
     <p v-if="cleanMsg" class="okbox" style="margin-top:10px">{{ cleanMsg }}</p>
 
+    <!-- 公共题库（GitHub 同步）已下线：题目统一进本地题库，发布/更新走「软件更新」 -->
+    <template v-if="false">
     <h3>公共题库（GitHub 同步）</h3>
     <p class="muted" style="margin:4px 0 10px">
       题目发布到一个公开的 GitHub 仓库，别人点「一键更新」就能把新题同步到自己的题库。
@@ -500,6 +802,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
         <label class="muted" style="font-size:12.5px; display:flex; align-items:center; gap:4px">
           <input v-model="ghDrafts" type="checkbox" /> 连草稿一起发布（{{ gh.local.drafts }} 道）
         </label>
+        <label class="muted" style="font-size:12.5px; display:flex; align-items:center; gap:4px"
+               title="远端被清空、或想覆盖已发布内容时用；平时不用勾">
+          <input v-model="ghForce" type="checkbox" /> 重新发布全部
+        </label>
         <button class="primary" :disabled="!!ghBusy || !gh.token.present"
                 :title="gh.token.present ? '' : '先配置令牌'"
                 @click="ghPublish">
@@ -511,11 +817,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
       <p v-if="ghMsg" class="okbox" style="margin-top:10px">{{ ghMsg }}</p>
       <p v-if="ghErr" class="warnbox" style="margin-top:10px">{{ ghErr }}</p>
     </div>
+    </template>
 
     <h3>服务</h3>
     <p class="muted" style="margin:4px 0">
-      本机启动用项目里的 <code>start.bat</code>；登录 Windows 后计划任务 <code>tiku-studio</code>（服务内部名，未改）会自动拉起。
-      打不开时先看 <code>data/server.log</code> 末尾几行。
+      安装版双击「启动-神奋.cmd」即可（题库会一起起来）；打不开时先看 <code>data/server.log</code> 末尾几行。
     </p>
   </div>
 
@@ -626,7 +932,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
         <ul>
           <li>出题页：「选中英文→翻译」、AI 生成答案、AI 生成解析、保存时题型归类</li>
           <li>精读页：逐句译文、重点句解释</li>
-          <li>智能出题：按级别/知识点/题型命题；批量拆题：补全缺失答案</li>
+          <li>AI 工作台：按级别/知识点/题型命题（智能出题子页签）</li>
         </ul>
 
         <h4>Key 存哪</h4>
@@ -750,7 +1056,30 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
 .pathinput { flex: 1; min-width: 260px; }
 .warnbox { margin-top: 10px; }
 
-.tabs { display: flex; gap: 6px; margin: 6px 0 14px; }
+.tabs { display: flex; gap: 6px; margin: 6px 0 14px; flex-wrap: wrap; }
+.exgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px 16px; }
+.exgrid label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #475467; }
+.exgrid label.wide { grid-column: 1 / -1; }
+.exgrid label.chk { flex-direction: row; align-items: center; gap: 6px; }
+.exgrid input, .exgrid select { height: 30px; border: 1px solid #e4e7ec; border-radius: 8px; padding: 0 8px; font-size: 13px; }
+.guide { line-height: 1.75; }
+.guide h3 { margin: 0 0 6px; }
+.guide h4 { margin: 20px 0 6px; font-size: 14.5px; }
+.guide .lead { color: #344054; background: #f7f9fc; border-left: 3px solid #2f6fed; padding: 10px 12px; border-radius: 0 8px 8px 0; margin: 8px 0 6px; }
+.guide .g2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 8px; }
+.guide ol.steps { margin: 6px 0; padding-left: 22px; }
+.guide ol.steps li { margin: 4px 0; }
+.guide code { background: #f2f4f7; border-radius: 4px; padding: 1px 5px; font-size: 12.5px; }
+.guide kbd { border: 1px solid #d0d5dd; border-bottom-width: 2px; border-radius: 5px; padding: 0 5px; font-size: 12px; background: #fff; }
+.guide table { border-collapse: collapse; font-size: 13px; }
+.guide table.route td, .guide table.keys td { padding: 4px 10px 4px 0; vertical-align: top; }
+.guide table.route .k { color: #667085; white-space: nowrap; }
+.guide table.keys td:first-child { white-space: nowrap; color: #344054; }
+.guide .tip2 { font-size: 12.8px; color: #475467; background: #fffaf0; border-radius: 8px; padding: 8px 12px; }
+.guide dl.faq { margin: 6px 0 0; }
+.guide dl.faq dt { font-weight: 600; margin-top: 10px; font-size: 13.2px; }
+.guide dl.faq dd { margin: 2px 0 0; color: #475467; font-size: 13px; }
+.exact { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
 .tab {
   padding: 7px 16px; border-radius: 999px; border: 1px solid var(--line);
   background: #fff; cursor: pointer; font-size: 13.5px; color: #344054;
@@ -775,4 +1104,7 @@ kbd.cap { border-color: var(--brand); background: var(--brand-soft); color: var(
 .embrow select { min-width: 280px; }
 .embmsg { color: #2f6fed; font-size: 13px; }
 .embnote { color: #667085; font-size: 12px; margin-top: 8px; line-height: 1.6; }
+.lanlist .path { max-width: 420px; }
+.notes { background: #f8fafc; border: 1px solid #eef1f6; border-radius: 8px; padding: 10px; font-size: 12.5px; white-space: pre-wrap; max-height: 220px; overflow: auto; }
+.errbox { background: #fef3f2; border: 1px solid #fecdca; color: #b42318; border-radius: 8px; padding: 8px 12px; font-size: 13px; }
 </style>

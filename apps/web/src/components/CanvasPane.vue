@@ -10,7 +10,7 @@ const props = defineProps({
   maxPages: { type: Number, default: 1 },
   metaable: { type: Boolean, default: false },   // 是否带页眉页脚（只有题目画布需要）
 })
-const emit = defineEmits(['activate', 'changed'])
+const emit = defineEmits(['activate', 'changed', 'files'])
 
 const PW = 595
 const PH = 842
@@ -185,6 +185,21 @@ function onTextMouseUp(b) {
   charSel.value = { id: b.id, start, end: start + text.length, text }
   tip.value = `已选中 ${text.length} 个字符：点 A＋ / A－ 或「上色」只改这几个字`
 }
+function onEditSelect(b, e) {
+  const el = e && e.target
+  if (!el || typeof el.selectionStart !== 'number') return
+  const s = el.selectionStart
+  const t = el.selectionEnd
+  if (s == null || t == null || s === t) return
+  const text = String(b.text || '').slice(s, t)
+  if (!text) return
+  charSel.value = { id: b.id, start: s, end: t, text }
+  tip.value = `已框住「${text.length > 14 ? text.slice(0, 14) + '…' : text}」：点色块或 A＋ A－ 只改这几个字`
+}
+// 改完一段字就退出编辑态，让改动立刻看得见（编辑框里是纯文本，看不到分色）
+function leaveEditToShow(b) {
+  if (editingId.value === b.id) editingId.value = ''
+}
 function applyCharColor(color) {
   const cs = charSel.value
   if (!cs || !cs.text) return false
@@ -192,6 +207,7 @@ function applyCharColor(color) {
   if (!b || b.type !== 'text') return false
   if (!applyRange(b, cs.start, cs.end, { c: color })) return false
   tip.value = `已把选中的 ${cs.text.length} 个字符设成 ${color}`
+  leaveEditToShow(b)
   emit('changed')
   return true
 }
@@ -205,6 +221,7 @@ function applyCharSize(delta) {
   if (!ok) return false
   const now = b.runs.find((r) => r.s)
   tip.value = `已把选中的 ${cs.text.length} 个字符字号改为 ${now ? now.s : b.size}pt`
+  leaveEditToShow(b)
   emit('changed')
   return true
 }
@@ -540,14 +557,41 @@ const marqueeStyle = computed(() => {
   }
 })
 
+// ---------- 组合 / 拆分 ----------
+// 组 = 一批共享 gid 的块。组必须**连续**排在 blocks 末尾（= 最上层），
+// 否则别的元素会插在组成员中间，看起来就是"组合被覆盖"。
+function liftGroupToTop(gid) {
+  if (!gid) return
+  const members = blocks.value.filter((b) => b.gid === gid)
+  if (members.length < 2) return
+  const rest = blocks.value.filter((b) => b.gid !== gid)
+  const same = rest.length + members.length === blocks.value.length
+    && rest.concat(members).every((b, i) => b.id === blocks.value[i]?.id)
+  if (same) return
+  blocks.value = [...rest, ...members]
+}
 function groupSel() {
   if (selIds.value.length < 2) return
   const gid = 'g' + Date.now().toString(36)
   for (const b of blocks.value) if (isSel(b.id)) b.gid = gid
+  liftGroupToTop(gid)
+  tip.value = `已把 ${selIds.value.length} 个元素组合成一个整体：拖动、缩放、删除都作用在整组上`
   emit('changed')
 }
 function ungroupSel() {
-  for (const b of blocks.value) if (isSel(b.id) && b.gid) b.gid = null
+  // 只要选中了组里的任意一个块，就把**整个组**拆开（不要求把成员全部选中）
+  const gids = new Set(blocks.value.filter((b) => isSel(b.id) && b.gid).map((b) => b.gid))
+  if (!gids.size) {
+    tip.value = blocks.value.some((b) => b.gid)
+      ? '先点一下组合里的任意元素选中它，再点「拆分」'
+      : '画布里还没有组合'
+    return
+  }
+  let n = 0
+  for (const b of blocks.value) {
+    if (b.gid && gids.has(b.gid)) { b.gid = null; n += 1 }
+  }
+  tip.value = `已拆开 ${gids.size} 个组合，${n} 个元素恢复独立（可单独拖动）`
   emit('changed')
 }
 
@@ -646,6 +690,7 @@ function removeBlock(id) {
 function bringTop(id) {
   const b = blocks.value.find((x) => x.id === id)
   if (!b) return
+  if (b.gid) { liftGroupToTop(b.gid); return }
   blocks.value = [...blocks.value.filter((x) => x.id !== id), b]
 }
 function rotateSel() {
@@ -833,6 +878,22 @@ async function unifyFonts() {
   tip.value = `已把 ${imgs.length} 张图统一到 ${fontTarget.value}pt 并左对齐`
 }
 
+// 预设色块：先框住要上色的字，再点色块，立刻生效（不用先开拾色器再回头选字）
+const PRESET_COLORS = [
+  { c: '#111111', n: '黑' }, { c: '#d21f1f', n: '红' }, { c: '#1a5fd0', n: '蓝' },
+  { c: '#1c8c46', n: '绿' }, { c: '#e07b12', n: '橙' }, { c: '#7a4bd0', n: '紫' },
+  { c: '#8a8a8a', n: '灰' },
+]
+async function pickColor(c) {
+  textColor.value = c
+  await applyColor()
+  if (!charSel.value || !charSel.value.text) {
+    if (!blocks.value.some((b) => isSel(b.id))) {
+      tip.value = `之后的文字用 ${c}；要改已有的字，先在文字里拖选那几个字再点色块`
+    }
+  }
+}
+
 async function applyColor() {
   if (applyCharColor(textColor.value)) return
   // 图片块：把近黑线条染成目标色（结构式变红等）
@@ -940,8 +1001,9 @@ function startDrag(e, b) {
   if (e.shiftKey) { toggleSel(b); return }
   if (!isSel(b.id)) selectGroupOf(b)
   else if (b.gid && !e.altKey) selectGroupOf(b)
+  if (b.gid) liftGroupToTop(b.gid)
   const moving = blocks.value.filter((x) => isSel(x.id)).map((x) => ({ id: x.id, x: x.x, y: x.y }))
-  drag = { ids: moving.length ? moving : [{ id: b.id, x: b.x, y: b.y }], sx: e.clientX, sy: e.clientY, kind: 'move' }
+  drag = { ids: moving.length ? moving : [{ id: b.id, x: b.x, y: b.y }], sx: e.clientX, sy: e.clientY, kind: 'move', gid: b.gid || null }
   window.addEventListener('pointermove', onMove)
   window.addEventListener('pointerup', endDrag)
 }
@@ -950,6 +1012,13 @@ function onBlkDown(e, b) {
   if (e.button !== 0) return
   const t = e.target
   if (t && t.closest && (t.closest('.grip') || t.closest('.handle'))) return
+  // 组内元素：点哪儿都是拖整组（Alt+点 = 逐字选色，双击 = 改文字）
+  if (b.gid && !e.altKey && editingId.value !== b.id) {
+    if (e.shiftKey) { toggleSel(b); return }
+    selectGroupOf(b)
+    startDrag(e, b)
+    return
+  }
   if (t && t.closest && t.closest('.tt')) {
     // 点在文字上：交给浏览器做原生选区（可只选一个字），不启动拖动
     // Shift+点击 = 加入/移出多选（拼接、合并文字要用到）
@@ -977,11 +1046,29 @@ function onMove(e) {
   const dx = (e.clientX - drag.sx) / scale.value
   const dy = (e.clientY - drag.sy) / scale.value
   if (drag.kind === 'move') {
+    // 整组统一钳制：所有被拖的块共用一个位移量，相对位置绝不会被撕开
+    let loX = -Infinity, hiX = Infinity, loY = -Infinity, hiY = Infinity
+    const items = []
     for (const it of drag.ids) {
       const t = blocks.value.find((x) => x.id === it.id)
       if (!t) continue
-      t.x = clamp(Math.round(it.x + dx), 0, Math.max(0, PW - (t.w || 40)))
-      t.y = clamp(Math.round(it.y + dy), 0, Math.max(0, limit.value - (t.h || 40)))
+      items.push({ t, it })
+      const w = t.w || 40
+      const h = t.type === 'image' ? (t.h || 40) : blockH(t)
+      loX = Math.max(loX, -it.x)
+      hiX = Math.min(hiX, Math.max(0, PW - w) - it.x)
+      loY = Math.max(loY, -it.y)
+      hiY = Math.min(hiY, Math.max(0, limit.value - h) - it.y)
+    }
+    const minDx = Math.min(loX, hiX)
+    const maxDx = Math.max(loX, hiX)
+    const minDy = Math.min(loY, hiY)
+    const maxDy = Math.max(loY, hiY)
+    const gdx = clamp(Math.round(dx), minDx, maxDx)
+    const gdy = clamp(Math.round(dy), minDy, maxDy)
+    for (const { t, it } of items) {
+      t.x = Math.round(it.x + gdx)
+      t.y = Math.round(it.y + gdy)
     }
     if (autoAlign.value) {
       const p = blocks.value.find((x) => x.id === drag.ids[0].id)
@@ -1017,9 +1104,19 @@ let ro = null
 onMounted(() => { fitScale(); ro = new ResizeObserver(fitScale); if (canvasEl.value?.parentElement) ro.observe(canvasEl.value.parentElement) })
 onBeforeUnmount(() => { if (ro) ro.disconnect() })
 
-// ---------- 拖放（来自左栏裁剪） ----------
+// ---------- 拖放（来自左栏裁剪 / 从桌面拖入图片或 PDF） ----------
 function dropOnCanvas(e) {
-  if (e.dataTransfer.files && e.dataTransfer.files.length) return
+  const fl = e.dataTransfer.files
+  if (fl && fl.length) {
+    // 从电脑里直接拖文件进来：图片自己落图，PDF 交给父组件开文献抽屉去裁
+    const host = e.currentTarget.getBoundingClientRect()
+    emit('files', {
+      files: Array.from(fl),
+      x: (e.clientX - host.left) / scale.value,
+      y: (e.clientY - host.top) / scale.value,
+    })
+    return
+  }
   const p = e.dataTransfer.getData('text/plain')
   if (!p) return
   const host = e.currentTarget.getBoundingClientRect()
@@ -1059,8 +1156,23 @@ function setLayout(layout) {
   nextTick(fitScale)
 }
 function clear() { blocks.value = []; clearSel(); clip.value = [] }
+// 把另一块画布的排版整段搬过来（答案画布用它把"我的题目"垫在上半部分）
+function addBlocks(list, opts = {}) {
+  const dy = Number(opts.dy) || 0
+  const gid = opts.gid || ''
+  let n = 0
+  for (const src of Array.isArray(list) ? list : []) {
+    const b = reactive({ ...src, id: uid() })
+    b.y = Math.round((Number(b.y) || 0) + dy)
+    if (gid) b.gid = gid
+    blocks.value.push(b)
+    n += 1
+  }
+  if (n) { emit('changed'); tip.value = opts.tip || `已放入 ${n} 个元素` }
+  return n
+}
 
-defineExpose({ getLayout, setLayout, addImage, clear, rotateSel, copySel, pasteClip, groupSel, ungroupSel, stitchSel, removeSelected, clearSel, nudge, addText, addTextFlow, reflowSelected, unifyFonts, selectAll, bumpSize, imageToText })
+defineExpose({ getLayout, setLayout, addImage, addBlocks, clear, rotateSel, copySel, pasteClip, groupSel, ungroupSel, stitchSel, removeSelected, clearSel, nudge, addText, addTextFlow, reflowSelected, unifyFonts, selectAll, bumpSize, imageToText })
 
 import Icon from './Icon.vue'
 </script>
@@ -1076,7 +1188,12 @@ import Icon from './Icon.vue'
       <input v-if="!collapsed" v-model.number="fontTarget" type="number" min="6" max="24" step="0.5"
              style="width:56px;padding:3px 6px" title="统一到多少 pt" />
       <span class="muted" v-if="!collapsed" style="margin-left:8px">颜色</span>
-      <input v-if="!collapsed" v-model="textColor" type="color" class="colorin" title="文字颜色" @change="applyColor" />
+      <span class="swatches" v-if="!collapsed">
+        <button v-for="p in PRESET_COLORS" :key="p.c" class="sw" :class="{ on: textColor === p.c }"
+                :style="{ background: p.c }" :title="`${p.n}：先拖选文字，再点这里直接上色`"
+                @mousedown.prevent="pickColor(p.c)"></button>
+      </span>
+      <input v-if="!collapsed" v-model="textColor" type="color" class="colorin" title="自定义颜色" @change="applyColor" />
       <button class="ghost sm" v-if="!collapsed" @click="applyColor" title="给选中的文字块上色；选中图片则把它染成这个颜色；未选中时用于新插入的文字">上色</button>
       <button class="ghost sm" v-if="!collapsed" @click="unifyFonts" title="按测得字号统一并左对齐">统一字号</button>
       <button class="icon" :title="collapsed ? '展开' : '收起'" @click="collapsed = !collapsed">{{ collapsed ? '▾' : '▴' }}</button>
@@ -1185,7 +1302,9 @@ import Icon from './Icon.vue'
             <template v-else>
               <textarea v-if="editingId === b.id" v-model="b.text" class="etext" autofocus
                         :style="{ fontSize: b.size * scale + 'px', textAlign: b.align, fontWeight: b.bold ? 700 : 400, color: b.color || undefined }"
-                        @pointerdown.stop @input="onTextInput(b)" @blur="editingId = ''"></textarea>
+                        @pointerdown.stop @input="onTextInput(b)" @blur="editingId = ''"
+                        @select="onEditSelect(b, $event)" @mouseup="onEditSelect(b, $event)"
+                        @keyup="onEditSelect(b, $event)"></textarea>
               <div v-else class="tt"
                    :style="{ fontSize: b.size * scale + 'px', textAlign: b.align, fontWeight: b.bold ? 700 : 400, color: b.color || undefined }"
                    v-html="textHtml(b)" @mouseup="onTextMouseUp(b)"></div>
@@ -1222,6 +1341,13 @@ import Icon from './Icon.vue'
 .colorin {
   width: 30px; height: 24px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: #fff;
 }
+.swatches { display: inline-flex; gap: 4px; align-items: center; }
+.sw {
+  width: 18px; height: 18px; padding: 0; border-radius: 50%; border: 1px solid rgba(0, 0, 0, .18);
+  cursor: pointer; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .35);
+}
+.sw:hover { transform: scale(1.12); }
+.sw.on { outline: 2px solid #2f6fed; outline-offset: 1px; }
 
 .cvhint {
   padding: 4px 12px 6px; font-size: 12.5px; color: #3b7a57; background: #f2faf5;

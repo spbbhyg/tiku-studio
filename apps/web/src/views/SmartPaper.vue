@@ -10,6 +10,7 @@ const TOPICS = ['原子结构', '分子结构与化学键', '晶体结构', '配
 const TYPES = ['选择题', '填空题', '计算题', '综合推断题', '简答题', '机理题']
 
 const tab = ref('lit')
+const emit = defineEmits(['go-read'])
 const docs = ref([])
 const docId = ref('')
 const outlineDoc = ref(null)
@@ -35,7 +36,15 @@ const qCount = ref(3)
 const importing = ref(false)
 const importOpen = ref(false)
 const importTopic = ref('')
+const importYear = ref('')
+const importAuthor = ref(localStorage.getItem('tiku-author-name') || '')
+const importMsg = ref('')
 const IMPORT_TOPICS = ['有机化学','高分子化学','晶体化学','无机综合与结构推断','方程式与元素化学','热力学与化学平衡','电化学','动力学','分析化学']
+const TOPIC_ID = {
+  有机化学: 'organic', 高分子化学: 'polymer', 晶体化学: 'crystal',
+  无机综合与结构推断: 'inorg-struct', 方程式与元素化学: 'equation',
+  热力学与化学平衡: 'thermo', 电化学: 'electro', 动力学: 'kinetics', 分析化学: 'analytical',
+}
 
 const picking = ref(false)
 const picked = ref({})
@@ -154,29 +163,43 @@ function resumeQJob() {
 }
 
 function openImport() {
-  if (!pickedItems.value.length) { err.value = '先勾选要导入题库的题'; return }
+  if (!pickedItems.value.length) { err.value = '先勾选要存进题库的题'; return }
   importTopic.value = ''
+  importYear.value = ''
+  importMsg.value = ''
   importOpen.value = true
 }
 
 async function importToBank() {
   const qs = pickedItems.value
-  if (!qs.length) { err.value = '先勾选要导入题库的题'; return }
+  if (!qs.length) { err.value = '先勾选要存进题库的题'; return }
+  const author = String(importAuthor.value || '').trim()
+  if (!author) { err.value = '请先填出题人：入库的题目必须能追到是谁出的'; return }
   importing.value = true
   err.value = ''
-  let ok = 0, dup = 0
+  importMsg.value = ''
+  let ok = 0
   try {
     for (const q of qs) {
-      const r = await api.post('/api/questions', {
-        stem: q.stem || '', answer: q.answer || '', analysis: q.analysis || '',
-        q_type: q.q_type || '综合', difficulty: q.difficulty || 3,
-        knowledge_points: importTopic.value ? [importTopic.value] : (q.knowledge_points || []),
-        images: q.images || [], score: q.score || 10,
+      const ans = [q.answer || '', q.analysis ? '解析：' + plain(q.analysis) : ''].filter(Boolean).join('\n\n')
+      await api.post('/api/chemy/publish', {
+        title: plain(q.stem || '').slice(0, 40) || '未命名题目',
+        topic: TOPIC_ID[importTopic.value] || 'organic',
+        year: importYear.value ? Number(importYear.value) : null,
+        stem: q.stem || '',
+        answer: ans,
+        points: Number(q.score) || 10,
+        author,
+        paper_title: 'AI 出题 · ' + author,
+        publish: true,
       })
-      if (r.deduped) dup += 1; else ok += 1
+      ok += 1
+    }
+    try { localStorage.setItem('tiku-author-name', author) } catch (e2) {
+      /* 隐私模式下写不了，忽略 */
     }
     importOpen.value = false
-    msg.value = `已导入题库 ${ok} 道${dup ? `，${dup} 道重复已跳过` : ''}`
+    msg.value = `已存进本地题库 ${ok} 道（在「题库」页里能搜到）`
   } catch (e2) {
     err.value = String(e2.message || e2)
   } finally { importing.value = false }
@@ -379,6 +402,10 @@ onBeforeUnmount(() => { stopBriefPoll(); stopQPoll() })
             {{ d.filename }}（{{ d.page_count }} 页）
           </option>
         </select>
+        <span v-if="!docs.length" class="mut empty2">
+          这里还没文献：先去<a href="javascript:void 0" @click="emit('go-read')">「精读文献」</a>导入一份 PDF，
+          或者直接把文献文字粘到下面的框里。
+        </span>
       </label>
 
       <div class="qgen">
@@ -474,13 +501,19 @@ onBeforeUnmount(() => { stopBriefPoll(); stopQPoll() })
 
       <div v-if="importOpen" class="modal" @click.self="importOpen = false">
         <div class="modal-card">
-          <h3 style="margin:0 0 8px">存入题库</h3>
-          <p class="muted" style="margin:0 0 10px">已勾选 {{ pickedItems.length }} 道题。可指定归入专题；不选则用 AI 自动识别的分类。</p>
+          <h3 style="margin:0 0 8px">存进本地题库</h3>
+          <p class="muted" style="margin:0 0 10px">已勾选 {{ pickedItems.length }} 道题，会直接写进本机题库（草稿箱 → 发布）。</p>
+          <label class="f req"><span>出题人 *</span>
+            <input v-model="importAuthor" placeholder="必填：入库后要能追到是谁出的" />
+          </label>
           <label class="f"><span>归入专题</span>
             <select v-model="importTopic">
-              <option value="">自动识别</option>
+              <option value="有机化学">有机化学</option>
               <option v-for="t in IMPORT_TOPICS" :key="t" :value="t">{{ t }}</option>
             </select>
+          </label>
+          <label class="f"><span>年份</span>
+            <input v-model="importYear" placeholder="如 2026（可空）" />
           </label>
           <div class="btnrow" style="margin-top:12px">
             <button @click="importOpen = false">取消</button>
@@ -494,6 +527,8 @@ onBeforeUnmount(() => { stopBriefPoll(); stopQPoll() })
 </template>
 
 <style scoped>
+.empty2 { display: block; margin-top: 6px; font-size: 12px; line-height: 1.6; }
+.empty2 a { color: var(--brand); }
 .smart { display: grid; grid-template-columns: 330px minmax(0, 1fr); gap: 16px; align-items: start; }
 .panel { position: sticky; top: 12px; }
 .tabs { display: flex; gap: 6px; margin-bottom: 14px; }
@@ -501,6 +536,9 @@ onBeforeUnmount(() => { stopBriefPoll(); stopQPoll() })
 .tabs button.on { background: var(--brand); border-color: var(--brand); color: #fff; font-weight: 600; }
 .panel h3 { font-size: 13.5px; margin: 14px 0 6px; color: #344054; }
 .modal { position: fixed; inset: 0; background: rgba(15,23,42,.35); display: grid; place-items: center; z-index: 60; }
+.modal-card .f.req span { color: #b42318; font-weight: 600; }
+.modal-card .f { display: grid; gap: 4px; margin-bottom: 10px; }
+.modal-card .f > span { font-size: 12.5px; color: #475467; }
 .modal-card { width: min(420px, 92vw); background: #fff; border-radius: 12px; padding: 18px; box-shadow: 0 20px 50px rgba(15,23,42,.25); }
 .qgen { margin: 10px 0 14px; padding: 10px; border: 1px solid #dbe4f3; border-radius: 10px; background: #f8fbff; }
 .numpick { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 8px; }

@@ -307,6 +307,15 @@ const scoreWarn = computed(() => {
   return bad
 })
 
+// A4 预览上的手工微调（只影响预览里的图片位置/宽度，不动文字排版）
+const LAYKEY = 'tiku-a4-layout-' + (Number(new URLSearchParams(location.search).get('id')) || 0)
+const a4layout = ref({})
+try { a4layout.value = JSON.parse(localStorage.getItem(LAYKEY) || '{}') } catch { a4layout.value = {} }
+watch(a4layout, (v) => {
+  try { localStorage.setItem(LAYKEY, JSON.stringify(v)) } catch { /* 空间满了就先不存 */ }
+}, { deep: true })
+function onLayout(v) { a4layout.value = v }
+
 const previewDoc = computed(() => {
   const d = JSON.parse(JSON.stringify({ ...doc, meta: { ...doc.meta, number: 1 } }))
   return d
@@ -486,10 +495,12 @@ defineExpose({ save, isDirty: () => dirty.value, doc })
           <span class="mut">{{ Math.round(zoom * 100) }}%</span>
           <button class="ghost sm" @click="zoom = Math.min(1.4, zoom + 0.1)">＋</button>
           <button class="ghost sm" @click="showPreview = !showPreview">{{ showPreview ? '收起' : '展开' }}</button>
+          <span class="mut hint">图可拖动位置、滚动滚轮调宽窄、双击复位；文字照旧自动排版</span>
         </div>
         <div v-show="showPreview" class="sheetwrap">
           <div class="scaler" :style="{ transform: `scale(${zoom})` }">
-            <QuestionSheet :doc="previewDoc" variant="a4" show-answers />
+            <QuestionSheet :doc="previewDoc" variant="a4" show-answers interactive
+                           :layout="a4layout" @update:layout="onLayout" />
           </div>
         </div>
       </div>

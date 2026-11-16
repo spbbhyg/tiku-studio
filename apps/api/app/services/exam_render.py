@@ -39,7 +39,7 @@ DEFAULT_TEMPLATE: dict = {
     "subSize": 6.85,
     "lineHeight": 15.6,
     "numbering": {"depth": 4, "style": "arabic"},
-    "scoreFormat": "第{n} 题{title}（{score} 分，占{percent}%）",
+    "scoreFormat": "第 {n} 题　{title}（{score} 分，占 {percent}%）",
     "heading": {"gapBefore": 15.6, "size": 10.45},
     "figure": {"maxWidth": 415, "maxHeight": 430, "captionSize": 6.8,
                "captionColor": "#7030A0", "autoNumber": True},
@@ -539,6 +539,9 @@ span.no { font-weight: 700; }
 .figcap { text-align: center; font-size: __CAPSIZE__pt; color: __CAPCOLOR__; line-height: 12pt; }
 
 .tblwrap { margin: 3.2pt 0; break-inside: avoid; page-break-inside: avoid; }
+table.rt { border-collapse: collapse; margin: 4pt 0 6pt; font-size: 9.5pt; line-height: 15pt; }
+table.rt th, table.rt td { border: 0.5pt solid #999; padding: 2pt 5pt; }
+table.rt th { background: #f4f4f2; font-weight: 600; }
 table.tbl { border-collapse: collapse; margin: 0 auto; font-size: __TBLSIZE__pt; line-height: 16pt; }
 table.tbl th, table.tbl td {
   border: __TBLBORDER__pt solid #000; padding: 0 3pt; text-align: center; font-weight: normal;
@@ -710,8 +713,14 @@ def _sub_html(sub: dict, no: str, part: str, tpl: dict, level: int, ctx: dict | 
     score = sub.get("score")
     sc = _fmt(score) if score not in (None, "", 0, "0") else ""
     numspan = f'<span class="no">{_esc(no)}</span> ' if no else ''
-    head = (f'<p class="body">{numspan}'
-            f'{_inline(str(sub.get("stem") or "").strip())}</p>')
+    if sub.get("stem_html"):
+        from . import rich_text as _rt
+        rblocks = _rt.to_blocks(sub.get("stem_html") or "")
+        inline = _rt.blocks_inline_html(rblocks)
+        head = f'<p class="body">{numspan}{inline}</p>{_rt.blocks_tables_html(rblocks)}'
+    else:
+        head = (f'<p class="body">{numspan}'
+                f'{_inline(str(sub.get("stem") or "").strip())}</p>')
     extra = _paras(sub.get("stem2") or "", True)
     figs = _blocks(sub, tpl, ctx)
     inner = head + figs + extra
@@ -726,7 +735,7 @@ def _sub_html(sub: dict, no: str, part: str, tpl: dict, level: int, ctx: dict | 
             lbl = (f"{_esc(no)} " if no else "本题") + f"共{sc} 分"
             bits.append(f'<p class="body"><span class="scmark">{lbl}</span></p>')
         if ans:
-            bits.append(_paras(ans, True))
+            bits.append(sub.get("answer_html") or _paras(ans, True))
         bits.append(aimg)
         for pt in points:
             if isinstance(pt, dict):
@@ -789,7 +798,7 @@ def build_doc_html(doc: dict, part: str = "questions") -> str:
             score=_fmt(score), percent=_fmt(percent))
         out.append(f'<div class="item" data-number="{number}">')
         out.append(f'<h2 class="qhead"><span class="qnum">{head_txt}</span>{_ref_mark(item)}</h2>')
-        out.append(_paras(item.get("intro") or "", True))
+        out.append(item.get("intro_html") or _paras(item.get("intro") or "", True))
         out.append(_blocks(item, tpl, ctx))
         for i, sub_node in enumerate(item.get("subs") or [], 1):
             subs = item.get("subs") or []
@@ -803,7 +812,8 @@ def build_doc_html(doc: dict, part: str = "questions") -> str:
                 lead = ""
                 if not (item.get("subs") or []) and float(score or 0) > 0:
                     lead = (f'<p class="body"><span class="scmark">本题共{_fmt(score)} 分</span></p>')
-                out.append(f'<div class="ansblock">{lead}{_paras(ans, True)}{aimg}</div>')
+                body = item.get("answer_html") or _paras(ans, True)
+                out.append(f'<div class="ansblock">{lead}{body}{aimg}</div>')
         out.append("</div>")
 
     if refs:

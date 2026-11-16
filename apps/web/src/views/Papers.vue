@@ -113,8 +113,8 @@ onMounted(load)
   <div v-if="err" class="errbox">{{ err }}</div>
   <div class="card">
     <div class="btnrow" style="margin-bottom:10px">
-      <button class="primary" @click="router.push('/exam')">出整卷</button>
-      <button class="ghost" @click="router.push('/exam')">
+      <button class="primary" @click="router.push('/compose')">出整卷</button>
+      <button class="ghost" @click="router.push('/compose')">
         查看草稿<template v-if="draftCount">（{{ draftCount }}）</template>
       </button>
       <span class="muted">人工整卷在「出整卷」里编辑；没出完的算草稿，出完后才出现在下面这张表里</span>
