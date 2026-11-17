@@ -66,7 +66,7 @@ function pickDoc(id) {
 }
 function imgUrl() {
   if (!st.docId) return ''
-  return `/api/manual/doc/${st.docId}/page/${st.page}.png?zoom=${st.zoom}`
+  return `/api/manual/doc/${st.docId}/page/${st.page}.png?zoom=${st.zoom}&v=2`
 }
 function norm(e) {
   const box = e.currentTarget.getBoundingClientRect()

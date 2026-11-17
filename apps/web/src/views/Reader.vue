@@ -65,7 +65,7 @@ const pendingCount = computed(
 )
 
 const pageUrl = computed(() => (docId.value
-  ? `/api/manual/doc/${docId.value}/page/${pageNo.value}.png?zoom=${zoom.value}`
+  ? `/api/manual/doc/${docId.value}/page/${pageNo.value}.png?zoom=${zoom.value}&v=2`
   : ''))
 
 // 文字层：把 PDF 的每行文字铺成透明层，支持鼠标选中后立即翻译

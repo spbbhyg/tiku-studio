@@ -8,7 +8,10 @@
 判定条件（同时满足，宁可漏删也不误删正文图）：
 1. 占页面面积 ≥ 30%；
 2. 图片本身平均亮度 ≥ 220（浅色）；
-3. 平均饱和度 ≤ 12（灰阶，水印通常是灰的；彩色大图不删）。
+3. 平均饱和度 ≤ 12（灰阶，水印通常是灰的；彩色大图不删）；
+4. 图上几乎没有深色墨迹（整页扫描图里的黑字会占不少像素，必须保留）；
+5. 页面上还有别的正文（文字层、矢量线条或其它图片）。整页只有这一张图
+   时它一定是扫描页/整页插图，不能当水印删掉。
 
 对于「文字型水印」或「已经烤进扫描图的水印」，这里不处理 —— 那种要么得靠 OCR 定位，
 要么得靠 inpainting，属于另一个量级的事。
@@ -23,6 +26,8 @@ from PIL import Image
 _MIN_AREA = 0.30
 _MEAN_L = 220.0
 _MAX_SAT = 12.0
+_DARK_L = 140.0          # 亮度低于此值算「墨迹」
+_MAX_DARK_FRAC = 0.0004  # 深色像素超过 0.04% 就当作正文图，不删
 
 
 def _is_light_overlay(raw: bytes) -> bool:
@@ -35,7 +40,33 @@ def _is_light_overlay(raw: bytes) -> bool:
         return False
     l = 0.299 * a[:, :, 0] + 0.587 * a[:, :, 1] + 0.114 * a[:, :, 2]
     sat = a.max(axis=2) - a.min(axis=2)
-    return float(l.mean()) >= _MEAN_L and float(sat.mean()) <= _MAX_SAT
+    if float(l.mean()) < _MEAN_L or float(sat.mean()) > _MAX_SAT:
+        return False
+    # 扫描页的正文全是深色字：哪怕只占千分之一，也绝不能删
+    if float((l < _DARK_L).mean()) > _MAX_DARK_FRAC:
+        return False
+    return True
+
+
+def _page_has_other_content(page, xref: int) -> bool:
+    """除这张图之外，页面上还有没有文字 / 矢量线 / 其它图片。"""
+    try:
+        if page.get_text("text").strip():
+            return True
+    except Exception:                                        # noqa: BLE001
+        pass
+    try:
+        if page.get_drawings():
+            return True
+    except Exception:                                        # noqa: BLE001
+        pass
+    try:
+        for img in page.get_images(full=True):
+            if img[0] != xref:
+                return True
+    except Exception:                                        # noqa: BLE001
+        pass
+    return False
 
 
 def strip_watermarks(page, doc=None) -> int:
@@ -63,6 +94,9 @@ def strip_watermarks(page, doc=None) -> int:
         except Exception:
             continue
         if not _is_light_overlay(raw):
+            continue
+        # 整页扫描件：图上只有这一张图、没有文字/矢量内容，删了就成白页
+        if not _page_has_other_content(page, xref):
             continue
         try:
             page.delete_image(xref)

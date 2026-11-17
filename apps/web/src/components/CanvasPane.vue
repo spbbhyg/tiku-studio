@@ -558,8 +558,8 @@ const marqueeStyle = computed(() => {
 })
 
 // ---------- 组合 / 拆分 ----------
-// 组 = 一批共享 gid 的块。组必须**连续**排在 blocks 末尾（= 最上层），
-// 否则别的元素会插在组成员中间，看起来就是"组合被覆盖"。
+// 组 = 一批共享 gid 的块。组合只记录关系，不改各块的坐标、层序；
+// 拖动时所有成员共用一个位移量，所以相对位置不变。拆分只清 gid，坐标原样保留。
 function liftGroupToTop(gid) {
   if (!gid) return
   const members = blocks.value.filter((b) => b.gid === gid)
@@ -574,8 +574,7 @@ function groupSel() {
   if (selIds.value.length < 2) return
   const gid = 'g' + Date.now().toString(36)
   for (const b of blocks.value) if (isSel(b.id)) b.gid = gid
-  liftGroupToTop(gid)
-  tip.value = `已把 ${selIds.value.length} 个元素组合成一个整体：拖动、缩放、删除都作用在整组上`
+  tip.value = `已把 ${selIds.value.length} 个元素组合成一个整体：拖动时整体平移，相对位置和层序都不变`
   emit('changed')
 }
 function ungroupSel() {
@@ -605,25 +604,44 @@ async function stitchSel() {
 
   if (imgs.length === list.length) {
     if (stitchBusy.value) return
-    const sorted = imgs.slice().sort((a, b) => (a.y - b.y) || (a.x - b.x))
-    const c0 = sorted[0].y + (sorted[0].h || 0) / 2
-    const sameRow = sorted.every((b) => Math.abs((b.y + (b.h || 0) / 2) - c0) < 24)
-    const dir = sameRow ? 'h' : 'v'
+    // 方向按选中内容的包围盒判断：横向排布时按 x 从左到右，竖向排布时按 y 从上到下
+    const x0 = Math.min(...imgs.map((b) => b.x))
+    const x1 = Math.max(...imgs.map((b) => b.x + (b.w || 0)))
+    const y0 = Math.min(...imgs.map((b) => b.y))
+    const y1 = Math.max(...imgs.map((b) => b.y + (b.h || 0)))
+    const dir = (x1 - x0) >= (y1 - y0) ? 'h' : 'v'
+    const sorted = imgs.slice().sort(dir === 'h'
+      ? (a, b) => (a.x - b.x) || (a.y - b.y)
+      : (a, b) => (a.y - b.y) || (a.x - b.x))
     stitchBusy.value = true
     tip.value = '正在拼接图片…'
     try {
-      const r = await api.post('/api/wb/stitch', { paths: sorted.map((b) => b.path), direction: dir, gap: 10 })
-      const x = Math.min(...sorted.map((b) => b.x))
-      const y = Math.min(...sorted.map((b) => b.y))
-      const w = Math.max(24, Math.max(...sorted.map((b) => b.x + (b.w || 0))) - x)
-      const h = Math.max(12, Math.round(Number(r.height || 1) / Math.max(1, Number(r.width || 1)) * w))
+      const r = await api.post('/api/wb/stitch', {
+        paths: sorted.map((b) => b.path), direction: dir, gap: 10,
+        // 图片在画布上转过 90° 的，后端先按同样角度转好再拼，避免宽高比错乱
+        rotates: sorted.map((b) => Number(b.rotate) || 0),
+      })
+      const x = Math.round(Math.min(...sorted.map((b) => b.x)))
+      const y = Math.round(Math.min(...sorted.map((b) => b.y)))
+      const aspect = Number(r.height || 1) / Math.max(1, Number(r.width || 1))
+      let w, h
+      if (dir === 'h') {
+        h = Math.max(24, ...sorted.map((b) => Math.round(b.h || (b.w || 0) * aspect)))
+        w = Math.round(h / Math.max(0.0001, aspect))
+      } else {
+        w = Math.max(60, ...sorted.map((b) => Math.round(b.w || 0)))
+        h = Math.round(w * aspect)
+      }
+      // 先保证不超出页面宽度，再按页面剩余高度等比缩
+      w = Math.max(40, Math.min(w, PW - x - 8))
+      h = Math.round(w * aspect)
+      const maxH = Math.max(60, limit.value - y - 12)
+      if (h > maxH) { const k = maxH / h; h = Math.round(h * k); w = Math.max(40, Math.round(w * k)) }
+      const px = Math.max(0, Math.min(x, PW - w - 8))
+      const py = Math.max(0, Math.min(y, limit.value - h - 8))
       const ids = new Set(sorted.map((b) => b.id))
       blocks.value = blocks.value.filter((b) => !ids.has(b.id))
-      // 拼完比页面还高就等比缩一下，避免新图直接溢出 A4
-      const maxH = Math.max(80, limit.value - y - 20)
-      let fw = w, fh = h
-      if (fh > maxH) { const k = maxH / fh; fw = Math.max(60, Math.round(w * k)); fh = Math.round(h * k) }
-      const nb = reactive({ id: uid(), type: 'image', path: r.path, x, y, w: fw, h: fh, rotate: 0, locked: false })
+      const nb = reactive({ id: uid(), type: 'image', path: r.path, x: px, y: py, w, h, rotate: 0, locked: false })
       blocks.value.push(nb)
       selectOnly(nb.id)
       tip.value = `已把 ${sorted.length} 张图拼成一张（${dir === 'v' ? '竖向' : '横向'}）`
@@ -637,21 +655,50 @@ async function stitchSel() {
   }
 
   if (texts.length === list.length) {
-    // 按阅读顺序（先上后下、先左后右）合并成一段，保留第一段的字号/对齐/颜色
+    // 按阅读顺序合并；同一行用空格，换行/上下关系用换行，保留各段已有的字符颜色
     const sorted = texts.slice().sort((a, b) => (a.y - b.y) || (a.x - b.x))
     const first = sorted[0]
-    const merged = sorted.map((b) => String(b.text || '').trim()).filter(Boolean).join('\n')
+    // 逐段判断是否与上一段在同一行：同一行用空格，换行/上下关系用换行
+    const runs = []
+    let plain = ''
+    let prev = null
+    for (const b of sorted) {
+      if (prev) {
+        const sameRow = Math.abs((b.y + blockH(b) / 2) - (prev.y + blockH(prev) / 2)) < 16
+        const sep = sameRow ? ' ' : '\n'
+        runs.push({ t: sep })
+        plain += sep
+      }
+      if (hasRuns(b)) {
+        for (const r of b.runs) {
+          const t = String((r && r.t) || '')
+          if (!t) continue
+          runs.push({ ...r, t })
+          plain += t
+        }
+      } else {
+        const t = String(b.text || '')
+        if (!t) continue
+        const c = safeColor(b.color)
+        const s = Number(b.size) || 0
+        runs.push({ t, ...(c ? { c } : {}), ...(s ? { s } : {}) })
+        plain += t
+      }
+      prev = b
+    }
+    if (!plain.trim()) { tip.value = '选中的文字都是空的，没有可合并的内容'; return }
     const x = Math.min(...sorted.map((b) => b.x))
     const y = Math.min(...sorted.map((b) => b.y))
     const right = Math.max(...sorted.map((b) => b.x + (b.w || 0)))
     const ids = new Set(sorted.slice(1).map((b) => b.id))
-    first.text = flowText(merged)
     first.x = x
     first.y = y
-    first.w = Math.max(80, right - x)
+    first.w = Math.max(80, Math.min(PW - x - 8, right - x))
+    first.runs = runs.filter((r) => String(r.t || ''))
+    normalizeRuns(first)
     blocks.value = blocks.value.filter((b) => !ids.has(b.id))
     selectOnly(first.id)
-    tip.value = `已合并 ${sorted.length} 段文字（保留第一段的字号与颜色）`
+    tip.value = `已合并 ${sorted.length} 段文字（保留各段的字号与颜色）`
     emit('changed')
     return
   }
@@ -993,6 +1040,24 @@ async function copyTrans() {
 
 // ---------- 拖动 / 缩放 ----------
 let drag = null
+// 拖动时只改 transform 做预览，松手才写回坐标：大图不会被每帧重排拖到「鬼畜」
+const dragPreview = reactive({ dx: 0, dy: 0, ids: [] })
+function isDragging(b) {
+  return !!(drag && drag.kind === 'move' && dragPreview.ids.includes(b.id))
+}
+function blkStyle(b) {
+  const st = {
+    left: b.x * scale.value + 'px', top: b.y * scale.value + 'px',
+    width: b.w * scale.value + 'px',
+    height: b.type === 'image' ? (b.h || 0) * scale.value + 'px' : 'auto',
+  }
+  if (isDragging(b)) {
+    st.transform = `translate3d(${dragPreview.dx * scale.value}px, ${dragPreview.dy * scale.value}px, 0)`
+    st.willChange = 'transform'
+    st.zIndex = 6
+  }
+  return st
+}
 function startDrag(e, b) {
   emit('activate')
   if (editingId.value === b.id) return
@@ -1001,9 +1066,11 @@ function startDrag(e, b) {
   if (e.shiftKey) { toggleSel(b); return }
   if (!isSel(b.id)) selectGroupOf(b)
   else if (b.gid && !e.altKey) selectGroupOf(b)
-  if (b.gid) liftGroupToTop(b.gid)
   const moving = blocks.value.filter((x) => isSel(x.id)).map((x) => ({ id: x.id, x: x.x, y: x.y }))
   drag = { ids: moving.length ? moving : [{ id: b.id, x: b.x, y: b.y }], sx: e.clientX, sy: e.clientY, kind: 'move', gid: b.gid || null }
+  dragPreview.dx = 0
+  dragPreview.dy = 0
+  dragPreview.ids = drag.ids.map((it) => it.id)
   window.addEventListener('pointermove', onMove)
   window.addEventListener('pointerup', endDrag)
 }
@@ -1036,6 +1103,7 @@ function onBlkDown(e, b) {
 function startResize(e, b) {
   emit('activate')
   if (b.type === 'image' && b.locked) { tip.value = '图片已固定，先点「解锁图片」才能缩放'; return }
+  if (b.gid) { tip.value = '组合内元素不单独缩放：拖动时整组平移，需要缩放请先拆分'; return }
   selectOnly(b.id)
   drag = { id: b.id, sx: e.clientX, sy: e.clientY, w: b.w, h: b.h, kind: 'size' }
   window.addEventListener('pointermove', onMove)
@@ -1048,11 +1116,9 @@ function onMove(e) {
   if (drag.kind === 'move') {
     // 整组统一钳制：所有被拖的块共用一个位移量，相对位置绝不会被撕开
     let loX = -Infinity, hiX = Infinity, loY = -Infinity, hiY = Infinity
-    const items = []
     for (const it of drag.ids) {
       const t = blocks.value.find((x) => x.id === it.id)
       if (!t) continue
-      items.push({ t, it })
       const w = t.w || 40
       const h = t.type === 'image' ? (t.h || 40) : blockH(t)
       loX = Math.max(loX, -it.x)
@@ -1064,32 +1130,45 @@ function onMove(e) {
     const maxDx = Math.max(loX, hiX)
     const minDy = Math.min(loY, hiY)
     const maxDy = Math.max(loY, hiY)
-    const gdx = clamp(Math.round(dx), minDx, maxDx)
-    const gdy = clamp(Math.round(dy), minDy, maxDy)
-    for (const { t, it } of items) {
-      t.x = Math.round(it.x + gdx)
-      t.y = Math.round(it.y + gdy)
-    }
-    if (autoAlign.value) {
-      const p = blocks.value.find((x) => x.id === drag.ids[0].id)
-      if (p) {
-        if (Math.abs(p.x - MARGIN) < 10) p.x = MARGIN
-        if (Math.abs(p.y - Math.round(p.y / 4) * 4) < 3) p.y = Math.round(p.y / 4) * 4
-      }
-    }
-  } else {
-    const b = blocks.value.find((x) => x.id === drag.id)
-    if (!b) return
-    const nw = clamp(Math.round(drag.w + dx), 80, PW - b.x - 8)
-    b.w = nw
-    if (b.type === 'image') b.h = Math.round(nw * (drag.h / Math.max(1, drag.w)))
+    dragPreview.dx = clamp(Math.round(dx), minDx, maxDx)
+    dragPreview.dy = clamp(Math.round(dy), minDy, maxDy)
+    drag.moved = !!(dragPreview.dx || dragPreview.dy)
+    return
   }
+  const b = blocks.value.find((x) => x.id === drag.id)
+  if (!b) return
+  const nw = clamp(Math.round(drag.w + dx), 80, PW - b.x - 8)
+  b.w = nw
+  if (b.type === 'image') b.h = Math.round(nw * (drag.h / Math.max(1, drag.w)))
   emit('changed')
 }
 function endDrag() {
   window.removeEventListener('pointermove', onMove)
   window.removeEventListener('pointerup', endDrag)
+  const d = drag
   drag = null
+  if (!d) return
+  const dx = dragPreview.dx
+  const dy = dragPreview.dy
+  dragPreview.ids = []
+  dragPreview.dx = 0
+  dragPreview.dy = 0
+  if (d.kind !== 'move' || !d.moved) return
+  for (const it of d.ids) {
+    const t = blocks.value.find((x) => x.id === it.id)
+    if (!t) continue
+    t.x = Math.round(it.x + dx)
+    t.y = Math.round(it.y + dy)
+  }
+  // 多选/组合时不做单块吸附，否则会把组内相对位置拆开
+  if (autoAlign.value && d.ids.length === 1) {
+    const p = blocks.value.find((x) => x.id === d.ids[0].id)
+    if (p) {
+      if (Math.abs(p.x - MARGIN) < 10) p.x = MARGIN
+      if (Math.abs(p.y - Math.round(p.y / 4) * 4) < 3) p.y = Math.round(p.y / 4) * 4
+    }
+  }
+  emit('changed')
 }
 
 // ---------- 缩放适配 ----------
@@ -1117,8 +1196,11 @@ function dropOnCanvas(e) {
     })
     return
   }
-  const p = e.dataTransfer.getData('text/plain')
+  const p = String(e.dataTransfer.getData('text/plain') || '').trim()
   if (!p) return
+  // 只接受真正像图片地址的拖入内容；拖动块时选中的文字也可能带 text/plain，
+  // 不能把它当成图片路径，否则会凭空多出一个打不开的图片块
+  if (!/^(https?:|data:image\/|\/api\/images\/)|\.(png|jpe?g|webp|gif|bmp)(\?|#|$)/i.test(p)) return
   const host = e.currentTarget.getBoundingClientRect()
   addImage(p, (e.clientX - host.left) / scale.value, (e.clientY - host.top) / scale.value)
 }
@@ -1288,8 +1370,8 @@ import Icon from './Icon.vue'
                :class="{ sel: isSel(b.id), img: b.type === 'image', grouped: !!b.gid, locked: b.locked }"
                :data-gid="b.gid || ''"
                :data-bid="b.id"
-               :style="{ left: b.x * scale + 'px', top: b.y * scale + 'px', width: b.w * scale + 'px',
-                         height: b.type === 'image' ? (b.h || 0) * scale + 'px' : 'auto' }"
+               :style="blkStyle(b)"
+               @dragstart.prevent
                @pointerdown="onBlkDown($event, b)"
                @dblclick="b.type === 'text' ? (editingId = b.id) : null">
             <span v-if="isSel(b.id) && editingId !== b.id && !b.locked" class="grip" title="拖动"
@@ -1376,7 +1458,7 @@ import Icon from './Icon.vue'
 .page { position: relative; background: #fff; box-shadow: none; flex: 0 0 auto; }
 .page .empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #98a2b3; font-size: 13px; text-align: center; padding: 0 40px; }
 .marquee { position: absolute; border: 1px dashed var(--brand, #2f6fed); background: rgba(47, 111, 237, .1); pointer-events: none; z-index: 5; }
-.blk { position: absolute; cursor: move; }
+.blk { position: absolute; cursor: move; touch-action: none; }
 .blk.sel { outline: 1px dashed var(--brand, #2f6fed); outline-offset: 1px; }
 .blk.grouped { outline: 1px dashed rgba(47, 111, 237, .45); outline-offset: 3px; }
 .blk.img img { display: block; width: 100%; height: 100%; object-fit: contain; user-select: none; }

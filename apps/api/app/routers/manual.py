@@ -198,8 +198,8 @@ def page_image(doc_id: str, page_no: int, zoom: float = 2.0):
     path = _doc_file(doc_id)
 
     rel_dir = Path("page-cache") / doc_id
-    # 缓存名带 -wm：去水印版与旧缓存分开，改逻辑后不会读到老图
-    cache = LIBRARY_DIR / rel_dir / f"p{page_no}-z{zoom:g}-wm.png"
+    # 缓存名带 -wm2：去水印逻辑升级过（保护整页扫描图），旧缓存不再复用
+    cache = LIBRARY_DIR / rel_dir / f"p{page_no}-z{zoom:g}-wm2.png"
     if not cache.exists():
         cache.parent.mkdir(parents=True, exist_ok=True)
         with fitz.open(str(path)) as doc:

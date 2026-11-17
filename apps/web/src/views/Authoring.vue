@@ -274,7 +274,7 @@ const textCache = new Map()
 let textSeq = 0
 
 const pageUrl = computed(() => (activeDoc.value
-  ? `/api/manual/doc/${activeDoc.value.doc_id}/page/${pageNo.value}.png?zoom=${zoom.value}`
+  ? `/api/manual/doc/${activeDoc.value.doc_id}/page/${pageNo.value}.png?zoom=${zoom.value}&v=2`
   : ''))
 function imgUrl(p) { return p ? `/api/images/${p}` : '' }
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
