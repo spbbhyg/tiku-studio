@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import shutil
 import subprocess
+import os
 import sys
 import time
 from datetime import datetime
@@ -32,8 +33,10 @@ def step(msg: str) -> None:
 
 
 def run(cmd: list[str], cwd: Path | None = None) -> None:
+    env = dict(os.environ)
+    env.setdefault("NODE_OPTIONS", "--max-old-space-size=8192")
     print("+", " ".join(str(c) for c in cmd), flush=True)
-    subprocess.run([str(c) for c in cmd], cwd=str(cwd or ROOT), check=True)
+    subprocess.run([str(c) for c in cmd], cwd=str(cwd or ROOT), check=True, env=env)
 
 
 def build_web() -> None:

@@ -11,6 +11,7 @@ import { extractFromFrame } from '../ketcherSvg.js'
 import Icon from '../components/Icon.vue'
 import TextMode from '../components/TextMode.vue'
 import ExamHome from './ExamHome.vue'
+import DocEditorPane from '../components/DocEditorPane.vue'
 
 const drawer = ref('')            // '' | 'formula' | 'struct' | 'pdf' | 'subs'
 
@@ -201,9 +202,11 @@ const route = useRoute()
 const router = useRouter()
 
 // 出题双模式：canvas = 老画布（一行行为都不改），text = 单题结构化录入
-const editMode = ref(route.query.mode === 'text'
-  ? 'text'
-  : (localStorage.getItem('tiku-author-mode') === 'text' ? 'text' : 'canvas'))
+const _m0 = String(route.query.mode || '')
+const _savedMode = String(localStorage.getItem('tiku-author-mode') || '')
+const editMode = ref(['text', 'paper', 'doc'].includes(_m0)
+  ? _m0
+  : (['text', 'paper', 'doc'].includes(_savedMode) ? _savedMode : 'canvas'))
 const canvasDirty = ref(false)
 const textRef = ref(null)
 const textOnly = ref(false)        // 库里这道题是单题模式录的
@@ -223,7 +226,7 @@ function switchMode(m) {
   canvasDirty.value = false
   localStorage.setItem('tiku-author-mode', m)
   const q = { ...route.query }
-  if (m === 'text') q.mode = 'text'; else delete q.mode
+  if (m === 'canvas') delete q.mode; else q.mode = m
   router.replace({ path: route.path, query: q })
 }
 const phoneHint = ref(typeof window !== 'undefined' && window.innerWidth < 820)
@@ -274,7 +277,7 @@ const textCache = new Map()
 let textSeq = 0
 
 const pageUrl = computed(() => (activeDoc.value
-  ? `/api/manual/doc/${activeDoc.value.doc_id}/page/${pageNo.value}.png?zoom=${zoom.value}&v=2`
+  ? `/api/manual/doc/${activeDoc.value.doc_id}/page/${pageNo.value}.png?zoom=${zoom.value}`
   : ''))
 function imgUrl(p) { return p ? `/api/images/${p}` : '' }
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
@@ -1523,12 +1526,16 @@ onBeforeUnmount(() => {
         <button :class="{ on: editMode === 'text' }" @click="switchMode('text')">单题</button>
         <button :class="{ on: editMode === 'paper' }" title="整卷：新建整卷，录大题小问，导出题目卷+答案卷"
                 @click="switchMode('paper')">整卷</button>
+        <button :class="{ on: editMode === 'doc' }" title="文档：直接用 Word 编辑（表格、修订、页眉页脚都保留）"
+                @click="switchMode('doc')">文档</button>
       </div>
-      <span class="whint">{{ editMode === 'paper'
-        ? '整卷模式：新建整卷→录大题小问→导出题目卷+答案卷（要按题库勾题请去「组卷」）'
-        : (editMode === 'text'
-          ? '单题模式：纯文本 + 行内图，右下角实时预览 A4'
-          : (drawer ? '右侧面板打开时，画布会自动缩窄' : '点上方按钮在右侧打开工具面板')) }}</span>
+      <span class="whint">{{ editMode === 'doc'
+        ? '文档模式：打开一份 Word 直接编辑，改完「保存到项目」'
+        : (editMode === 'paper'
+          ? '整卷模式：新建整卷→录大题小问→导出题目卷+答案卷（要按题库勾题请去「组卷」）'
+          : (editMode === 'text'
+            ? '单题模式：纯文本 + 行内图，右下角实时预览 A4'
+            : (drawer ? '右侧面板打开时，画布会自动缩窄' : '点上方按钮在右侧打开工具面板'))) }}</span>
     </div>
 
     <div class="wbody" v-show="editMode === 'canvas'">
@@ -1852,6 +1859,10 @@ onBeforeUnmount(() => {
       <div class="pmwrap"><ExamHome /></div>
     </div>
 
+    <div class="wbody dmode" v-show="editMode === 'doc'">
+      <DocEditorPane />
+    </div>
+
     <div v-if="pop.open" class="textpop" :style="{ left: pop.x + 'px', top: pop.y + 'px' }"
          @pointerdown.stop>
       <div class="pophead">
@@ -1931,6 +1942,7 @@ onBeforeUnmount(() => {
 .xfoot { display: flex; align-items: center; gap: 8px; padding: 10px 18px 16px; border-top: 1px dashed var(--line); position: sticky; bottom: 0; background: #fff; }
 .xsel { height: 30px; border: 1px solid var(--line); border-radius: 6px; font-size: 12px; padding: 0 8px; }
 .wbody.pmode { padding: 0; overflow: auto; }
+.wbody.dmode { padding: 0; overflow: hidden; }
 .pmwrap { padding: 18px 22px 40px; }
 .stepbar {
   display: flex; align-items: center; gap: 6px; margin-bottom: 8px;

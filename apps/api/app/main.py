@@ -24,6 +24,7 @@ from .routers import (workbench, wb_extra, lan, update as update_router, ai as a
                       manual, meta, paper_canvas, papers, questions, sets,
                       settings as settings_router, v2 as v2_router, reader,
                       chemy as chemy_router, convert as convert_router, drafts as drafts_router, compose as compose_router,
+                      doce as doce_router,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -79,6 +80,7 @@ app.include_router(chemy_router.router)
 app.include_router(drafts_router.router)
 app.include_router(compose_router.router)
 app.include_router(convert_router.router)
+app.include_router(doce_router.router)
 app.include_router(lan.router)
 app.include_router(update_router.router)
 
