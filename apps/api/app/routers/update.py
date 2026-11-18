@@ -141,6 +141,29 @@ def check(force: int = 0):
     return out
 
 
+def _pull(url: str, headers: dict, target: Path, tmo) -> int:
+    """下载到 target，已存在的部分用 Range 接着下。返回已写入的总字节数。"""
+    done = target.stat().st_size if target.exists() else 0
+    h = dict(headers)
+    if done:
+        h["Range"] = f"bytes={done}-"
+    with httpx.stream("GET", url, timeout=tmo, follow_redirects=True, headers=h) as r:
+        if r.status_code == 416:                  # 已经下完了
+            return done
+        if r.status_code not in (200, 206):
+            raise HTTPException(502, f"下载失败：GitHub 返回 {r.status_code}")
+        mode = "ab" if (r.status_code == 206 and done) else "wb"
+        if mode == "wb":
+            done = 0
+        with target.open(mode) as fh:
+            for chunk in r.iter_bytes(1 << 20):
+                if not chunk:
+                    continue
+                fh.write(chunk)
+                done += len(chunk)
+    return done
+
+
 @router.post("/download")
 def download():
     info = check()
@@ -161,17 +184,33 @@ def download():
     else:
         url = str(asset.get("url"))
         headers = {"User-Agent": "shenfen-updater"}
-    try:
-        with httpx.stream("GET", url, timeout=60, follow_redirects=True, headers=headers) as r:
-            if r.status_code != 200:
-                raise HTTPException(502, f"下载失败：{r.status_code}")
-            with target.open("wb") as fh:
-                for chunk in r.iter_bytes(1 << 16):
-                    fh.write(chunk)
-    except HTTPException:
-        raise
-    except Exception as exc:                      # noqa: BLE001
-        raise HTTPException(502, f"下载失败：{exc}")
+    # 安装包 700MB 以上，而且 GitHub 的下载节点经常半路掐断连接：
+    # 用「Range 断点续传 + 多次重试」，每次从已下载的字节数接着下。
+    expect = int(asset.get("size") or 0)
+    tmo = httpx.Timeout(connect=20.0, read=None, write=30.0, pool=30.0)
+    last = ""
+    for attempt in range(1, 41):
+        done = target.stat().st_size if target.exists() else 0
+        if expect and done >= expect:
+            break
+        try:
+            done = _pull(url, headers, target, tmo)
+        except HTTPException:
+            raise
+        except Exception as exc:                  # noqa: BLE001
+            last = str(exc)
+            print(f"[update] 第 {attempt} 次下载中断（{last}），3 秒后续传…")
+            time.sleep(3)
+            continue
+        if not expect or done >= expect:
+            break
+        print(f"[update] 已下 {done/1048576:.0f}/{expect/1048576:.0f} MB，继续…")
+    done = target.stat().st_size if target.exists() else 0
+    if expect and done < expect:
+        raise HTTPException(502, f"下载不完整（{done/1048576:.0f}/{expect/1048576:.0f} MB，{last}）。"
+                                 f"网络到 GitHub 的下载节点不稳，重试一次，或去发布页手动下 zip。")
+    if done < 1000:
+        raise HTTPException(502, "下载失败：文件是空的，可能被网络中间设备拦了")
 
     staged = UPDATE_DIR / "staged"
     if staged.exists():
