@@ -35,6 +35,8 @@ REPO = "tiku-studio"
 API = f"https://api.github.com/repos/{OWNER}/{REPO}"
 UPDATE_DIR = DATA_DIR / "update"
 PENDING = UPDATE_DIR / "pending.json"
+CHECK_CACHE = UPDATE_DIR / "check.json"
+CACHE_TTL = 600          # 10 分钟内重复点「检查更新」不再打 GitHub（省掉 60 次/小时的额度）
 
 
 def _app_root() -> Path:
@@ -58,25 +60,72 @@ def _local_exe() -> Path | None:
     return None
 
 
+def _cache_read(force: bool = False):
+    if force:
+        return None
+    try:
+        d = json.loads(CHECK_CACHE.read_text(encoding="utf-8"))
+        if time.time() - float(d.get("at") or 0) < CACHE_TTL:
+            return d.get("payload")
+    except Exception:                                  # noqa: BLE001
+        return None
+    return None
+
+
+def _cache_write(payload: dict) -> None:
+    try:
+        UPDATE_DIR.mkdir(parents=True, exist_ok=True)
+        CHECK_CACHE.write_text(json.dumps({"at": time.time(), "payload": payload},
+                                          ensure_ascii=False), encoding="utf-8")
+    except Exception:                                  # noqa: BLE001
+        pass
+
+
+def _limited(resp) -> dict:
+    """把 403 说人话：GitHub 对未登录调用是 60 次/小时，按出口 IP 算。"""
+    reset = (resp.headers or {}).get("X-RateLimit-Reset") or ""
+    remain = (resp.headers or {}).get("X-RateLimit-Remaining") or ""
+    if remain == "0" and reset.isdigit():
+        mins = max(1, int((int(reset) - time.time()) / 60))
+        return {"ok": False, "limited": True, "current": VERSION,
+                "error": f"GitHub 限流：每小时只给 60 次查询，现在用完了，约 {mins} 分钟后自动恢复。"
+                         f"稍后再点一次，或者换个网络（手机热点）试试。"}
+    return {"ok": False, "limited": True, "current": VERSION,
+            "error": "GitHub 暂时拒绝访问（403）。多半也是限流，等一会儿再试。"}
+
+
 @router.get("/check")
-def check():
+def check(force: int = 0):
+    """查最新版。结果缓存 10 分钟：GitHub 未登录调用只有 60 次/小时。"""
+    cached = _cache_read(force=bool(force))
+    if cached:
+        return cached
+
     try:
         r = httpx.get(f"{API}/releases/latest", timeout=12,
-                      headers={"Accept": "application/vnd.github+json"})
-    except Exception as exc:                      # noqa: BLE001
-        return {"ok": False, "error": f"连不上 GitHub：{exc}", "current": VERSION}
+                      headers={"Accept": "application/vnd.github+json",
+                               "User-Agent": "shenfen-updater"})
+    except Exception as exc:                           # noqa: BLE001
+        return {"ok": False, "current": VERSION,
+                "error": f"连不上 GitHub：{exc}（检查网络/代理）"}
     if r.status_code == 404:
-        return {"ok": True, "current": VERSION, "latest": VERSION, "has_update": False,
-                "note": "仓库里还没有发布版本"}
+        out = {"ok": True, "current": VERSION, "latest": VERSION, "has_update": False,
+               "note": "仓库里还没有发布版本"}
+        _cache_write(out)
+        return out
+    if r.status_code == 403:
+        return _limited(r)
     if r.status_code != 200:
-        return {"ok": False, "error": f"GitHub 返回 {r.status_code}", "current": VERSION}
+        return {"ok": False, "current": VERSION, "error": f"GitHub 返回 {r.status_code}"}
+
     data = r.json()
     tag = str(data.get("tag_name") or data.get("name") or "")
-    assets = [{"name": a.get("name"), "size": a.get("size"), "url": a.get("browser_download_url")}
+    assets = [{"id": a.get("id"), "name": a.get("name"), "size": a.get("size"),
+               "url": a.get("browser_download_url")}
               for a in (data.get("assets") or [])]
     zips = [a for a in assets if str(a.get("name") or "").lower().endswith(".zip")]
     has = bool(tag) and _norm(tag) > _norm(VERSION)
-    return {
+    out = {
         "ok": True,
         "current": VERSION,
         "latest": tag,
@@ -86,7 +135,10 @@ def check():
         "page": data.get("html_url"),
         "assets": assets,
         "zip": zips[0] if zips else None,
+        "cached_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
+    _cache_write(out)
+    return out
 
 
 @router.post("/download")
@@ -101,8 +153,16 @@ def download():
         raise HTTPException(400, "这个版本没有带 zip 安装包，去 GitHub 页面手动下载")
     UPDATE_DIR.mkdir(parents=True, exist_ok=True)
     target = UPDATE_DIR / str(asset["name"])
+    # 优先走 API 资产端点：它会 302 到 release-assets.githubusercontent.com，
+    # 而 github.com/…/releases/download/… 在有些网络（比如本机）根本连不通。
+    if asset.get("id"):
+        url = f"https://api.github.com/repos/{OWNER}/{REPO}/releases/assets/{asset['id']}"
+        headers = {"Accept": "application/octet-stream", "User-Agent": "shenfen-updater"}
+    else:
+        url = str(asset.get("url"))
+        headers = {"User-Agent": "shenfen-updater"}
     try:
-        with httpx.stream("GET", asset["url"], timeout=60, follow_redirects=True) as r:
+        with httpx.stream("GET", url, timeout=60, follow_redirects=True, headers=headers) as r:
             if r.status_code != 200:
                 raise HTTPException(502, f"下载失败：{r.status_code}")
             with target.open("wb") as fh:

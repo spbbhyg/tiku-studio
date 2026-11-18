@@ -431,16 +431,20 @@ async function copyText(t, tag) {
 
 // ---------------------------------------------------------------- 软件更新
 const up = reactive({ cur: '', latest: '', has: false, notes: '', page: '', zip: null,
-                      busy: '', err: '', msg: '', pending: null })
-async function checkUpdate() {
+                      busy: '', err: '', msg: '', pending: null, cachedAt: '' })
+async function checkUpdate(force) {
   up.busy = 'check'; up.err = ''; up.msg = ''
   try {
-    const r = await api.get('/api/update/check')
+    const r = await api.get('/api/update/check' + (force ? '?force=1' : ''))
     if (r.ok === false) throw new Error(r.error || '查不到')
     up.cur = r.current; up.latest = r.latest; up.has = !!r.has_update
     up.notes = r.notes || ''; up.page = r.page || ''; up.zip = r.zip || null
+    up.cachedAt = r.cached_at || ''
     up.msg = r.has_update ? `发现新版本 ${r.latest}` : (r.note || '已经是最新版了')
-  } catch (e) { up.err = e.message || String(e) } finally { up.busy = '' }
+  } catch (e) {
+    up.err = e.message || String(e)
+    if (/限流/.test(up.err)) up.msg = ''
+  } finally { up.busy = '' }
 }
 async function downloadUpdate() {
   up.busy = 'dl'; up.err = ''; up.msg = '正在下载…（安装包有点大，等一会儿）'
@@ -532,13 +536,17 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
   <div v-if="tab === 'update'" class="card">
     <h3>软件更新</h3>
     <p class="muted" style="margin:4px 0 10px">
-      从 GitHub 上的发布页拉最新版（仓库 <code>spbbhyg/tiku-studio</code>）。查版本与下载都不需要登录，
-      点了就会自己下载、解包、覆盖、重启。
+      三步：<b>检查更新</b> → <b>下载更新</b> → <b>应用并重启</b>。全程不用登录 GitHub，数据在 <code>data/</code> 里不会被覆盖。
+    </p>
+    <p class="muted" style="margin:4px 0 10px; font-size:12.5px">
+      小提示：GitHub 对未登录查询有「每小时 60 次」的限制，超了会提示<b>限流</b>（等一小时或换手机热点就好）。
+      所以这里查到的结果会缓存 10 分钟，反复点不会重复消耗额度；确实要立刻重查再点「强制刷新」。
     </p>
     <div class="rownow">
       <span class="lbl">当前版本</span>
       <code>{{ up.cur || '—' }}</code>
-      <button class="primary" :disabled="!!up.busy" @click="checkUpdate">{{ up.busy === 'check' ? '检查中…' : '检查更新' }}</button>
+      <button class="primary" :disabled="!!up.busy" @click="checkUpdate(false)">{{ up.busy === 'check' ? '检查中…' : '检查更新' }}</button>
+      <button :disabled="!!up.busy" @click="checkUpdate(true)">强制刷新</button>
       <a v-if="up.page" :href="up.page" target="_blank" class="ghost sm" style="display:inline-flex;align-items:center">打开发布页</a>
     </div>
     <p v-if="up.latest" class="muted" style="margin-top:8px">最新版本：<b>{{ up.latest }}</b><span v-if="up.has" class="chip brand" style="margin-left:6px">有新版本</span></p>
