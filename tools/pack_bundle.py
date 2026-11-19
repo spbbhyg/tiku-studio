@@ -21,6 +21,12 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "dist-app" / "tiku-studio"
 OUT = ROOT / "dist-app" / "神奋-完整版"
@@ -35,7 +41,7 @@ echo 正在启动神奋（第一次会慢一点，浏览器稍后自己会打开
 start "" tiku-studio.exe
 """
 
-README = """神奋  题库 · 对纲 · 组卷（第三版）
+README = """神奋  题库 · 对纲 · 组卷（0.5.0 · 第四版）
 =====================================
 
 怎么用
@@ -61,8 +67,31 @@ README = """神奋  题库 · 对纲 · 组卷（第三版）
          第一次打开文档模式要等几秒（在加载 Word 引擎），等它出来别关页面；
          文档存在 data/docx 里，插图存在 data/docx-assets，备份就备份整个 data 目录。
 
+三栏工作台（出题 → 文档）
+  左栏写题目文本，中栏是真正的 Word，右栏是画布；左上「«」右上「»」可以收起左右两栏。
+  左边写完点「生成排版稿 →」自动排成 Word 段落；「画布图片进文档」把画布上的图整块搬进 Word。
+  「题目文档 / 答案文档」两个标签各自记着内容，来回切不会丢。
+
+组卷与删题
+  组卷页左栏按专题浏览 200+ 道题库原题，点一行就进卷；右栏的「×」只是从卷子移出，
+  「从题库删除」才是真删（要勾确认）。卷名留空就不印标题，分值默认不印。
+
+格式转换（四合一）
+  文档互转（Word↔PDF）、PDF 拆分（按页码，打包 zip）、PDF 合并（可调顺序）、
+  扫描件转 Word（OCR 认字）。都在本机转，每步会说明用了哪个引擎。
+
+本地模型（可选）
+  设置 → 本地模型：三档千问 0.5B / 1.5B / 3B，先装 Ollama 引擎（页面里有下载链接），
+  再点「下载」把模型拉到本机，之后断网也能用；有独立显卡会自动用显卡。
+  AI 工作台里还有「小工具」：给想法→写题干、翻译并保留公式。
+
+报错
+  任何报错的第一行都是中文说明该做什么（例如「连不上本地服务：先确认软件开着」），
+  技术细节留在后面。
+
 更新
   设置 → 软件更新 → 检查更新（从 GitHub 拉最新版，自己下载、覆盖、重启）。
+  版本号会跟发布页对上，看到「已是最新」就说明没出新版。
 
 局域网
   设置 → 局域网：把上面的地址发给同办公室的老师，他们用浏览器打开就是同一份数据。
@@ -130,9 +159,16 @@ def make_zip(src: Path, target: Path) -> Path:
         # -mx=1：zip 里再高的档位对 1.5G 的程序文件收益很小，却容易在长路径上出错
         r = subprocess.run([str(SEVENZIP), "a", "-tzip", "-mx=1", str(tmp), "."],
                            cwd=str(src), capture_output=True)
-        ok = r.returncode == 0 and tmp.exists()
+        ok = r.returncode == 0 and tmp.exists() and tmp.stat().st_size > 1024
         if not ok:
-            print("7z 失败，回退到 Python zipfile：", r.stderr.decode("utf-8", "replace")[:300])
+            msg = r.stderr.decode("utf-8", "replace")
+            msg = "".join(ch if ord(ch) < 128 else "?" for ch in msg)[:200]
+            print(f"7z 失败（退出码 {r.returncode}），回退到 Python zipfile：{msg}", flush=True)
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
     if not ok:
         import zipfile
 

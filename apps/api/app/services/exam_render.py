@@ -781,8 +781,9 @@ def build_doc_html(doc: dict, part: str = "questions") -> str:
     out: list[str] = []
     out.append(_head(doc, tpl, part))
     out.append('<div class="sheet"><div class="sheet-inner">')
-    title = str(doc.get("title") or "试卷").strip()
-    out.append(f'<h1 class="title">{_inline(title)}</h1>')
+    title = str(doc.get("title") or "").strip()
+    if title:
+        out.append(f'<h1 class="title">{_inline(title)}</h1>')
     sub = str(doc.get("subtitle") or "").strip()
     if sub:
         out.append(f'<p class="subtitle">{_inline(sub)}</p>')
@@ -796,6 +797,8 @@ def build_doc_html(doc: dict, part: str = "questions") -> str:
         head_txt = tpl["scoreFormat"].format(
             n=number, title=_inline(str(item.get("title") or "").strip()),
             score=_fmt(score), percent=_fmt(percent))
+        if not (tpl.get("score") or {}).get("show", True) and item.get("showScore") is False:
+            head_txt = head_txt.split("（")[0]
         out.append(f'<div class="item" data-number="{number}">')
         out.append(f'<h2 class="qhead"><span class="qnum">{head_txt}</span>{_ref_mark(item)}</h2>')
         out.append(item.get("intro_html") or _paras(item.get("intro") or "", True))

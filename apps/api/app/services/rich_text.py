@@ -323,7 +323,8 @@ def docx_add(container, blocks: list[dict], size_pt: float, *, indent_cm: float 
                     _ea(run, font)
             continue
         par = container.add_paragraph()
-        par.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+        # 左对齐：两端对齐时，行里夹着英文/公式的长串会把空格拉得很开（导出 Word 看着"满是空格"）
+        par.alignment = WD_ALIGN_PARAGRAPH.LEFT
         pf = par.paragraph_format
         pf.space_before = Pt(0)
         pf.space_after = Pt(2)

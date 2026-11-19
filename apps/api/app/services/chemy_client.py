@@ -155,3 +155,8 @@ def patch_question(qid: str, **fields) -> dict:
 def upload_figure(qid: str, filename: str, content: bytes, content_type: str = "image/png") -> dict:
     return call("POST", f"/api/admin/questions/{qid}/figures",
                 files={"file": (filename, content, content_type)}, timeout=60.0)
+
+
+def delete_question(qid: str) -> dict:
+    """删除一道题（题库侧是神奋加的补丁接口）。"""
+    return call("DELETE", f"/api/admin/questions/{qid}", timeout=30.0)

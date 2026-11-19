@@ -106,6 +106,12 @@ def set_config(body: AiConfigIn, db: Session = Depends(get_db)):
                           free_gateway=body.free_gateway)
 
 
+@router.get("/diagnose")
+def diagnose_ai(db: Session = Depends(get_db)):
+    """AI 自检：一条条告诉你为什么能用 / 不能用，以及下一步怎么做。"""
+    return ai.diagnose(db)
+
+
 @router.get("/free-models")
 def free_models():
     """列出 DeepSeek Harness 本机免费模型（需插件 + DSH 在运行）。"""

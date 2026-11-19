@@ -303,3 +303,30 @@ def export(ids: str, mode: str = "print", answers: int = 0,
         target = (f"{chemy.base_url()}/print/collection?ids={quote(','.join(wanted))}"
                   f"&answers={1 if answers else 0}&title={quote(title)}")
     return RedirectResponse(target, status_code=307)
+
+
+# ---------- 删除题目（题库原版没有，是我们打的补丁） ----------
+
+class DeleteIn(BaseModel):
+    ids: list[str]
+    confirm: str = ""
+
+
+@router.post("/delete")
+def delete_questions(body: DeleteIn):
+    """从题库里真删题目。必须带 confirm='删除' 才执行，避免误点。"""
+    wanted = [str(i).strip() for i in (body.ids or []) if str(i).strip()]
+    if not wanted:
+        raise HTTPException(400, "没有选中题目")
+    if (body.confirm or "").strip() != "删除":
+        raise HTTPException(400, "真删题库题目要二次确认：请勾选「我确认删除」再点一次")
+    done, failed = [], []
+    for qid in wanted:
+        try:
+            chemy.delete_question(qid)
+            done.append(qid)
+        except chemy.ChemyError as exc:
+            failed.append({"id": qid, "error": str(exc)})
+        except Exception as exc:  # noqa: BLE001
+            failed.append({"id": qid, "error": str(exc)})
+    return {"ok": not failed, "deleted": done, "failed": failed, "count": len(done)}

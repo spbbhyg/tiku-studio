@@ -1,5 +1,5 @@
 <template>
-  <div class="doce">
+  <div class="doce" @paste.capture="onPaste">
     <div class="dbar">
       <div class="row">
         <b>文档编辑</b>
@@ -24,6 +24,8 @@
         <span class="sep" />
         <button class="btn" :disabled="!ready" title="插入化学公式（支持 \ce{} 写法）" @click="openFormula">公式</button>
         <button class="btn" :disabled="!ready" title="画结构式 / 反应式插进文档（箭头、加号都在）" @click="openStruct">结构式</button>
+        <button class="btn" :disabled="!ready" title="插图：选图片（可多选），或者直接把截图 Ctrl+V 粘到文档里" @click="pickImages">插图</button>
+        <input ref="imgEl" type="file" accept="image/*" multiple hidden @change="onPickImages" />
         <button class="btn ghost" :disabled="!current || busy" @click="removeCurrent">删除</button>
         <span class="grow" />
         <span class="mut" v-if="ready && current">当前打开：{{ current }}</span>
@@ -105,6 +107,7 @@ const err = ref('')
 const tbEl = ref(null)
 const edEl = ref(null)
 const fileEl = ref(null)
+const imgEl = ref(null)
 const sd = shallowRef(null)
 
 const fx = reactive({ open: false, tex: '', display: false, url: '', data: '', w: 0, h: 0, busy: false })
@@ -120,6 +123,16 @@ const fxChips = [
   { t: '下标', ins: '_{}', back: 1 },
   { t: '上标', ins: '^{}', back: 1 },
   { t: '分数', ins: '\\frac{}{}', back: 3 },
+  { t: '根号', ins: '\\sqrt{}', back: 1 },
+  { t: 'α', ins: '\\alpha ' }, { t: 'β', ins: '\\beta ' }, { t: 'γ', ins: '\\gamma ' },
+  { t: 'δ', ins: '\\delta ' }, { t: 'Δ', ins: '\\Delta ' }, { t: 'ε', ins: '\\varepsilon ' },
+  { t: 'θ', ins: '\\theta ' }, { t: 'λ', ins: '\\lambda ' }, { t: 'μ', ins: '\\mu ' },
+  { t: 'ν', ins: '\\nu ' }, { t: 'π', ins: '\\pi ' }, { t: 'ρ', ins: '\\rho ' },
+  { t: 'σ', ins: '\\sigma ' }, { t: 'τ', ins: '\\tau ' }, { t: 'φ', ins: '\\varphi ' },
+  { t: 'ω', ins: '\\omega ' }, { t: 'Ω', ins: '\\Omega ' },
+  { t: '⇌', ins: '\\rightleftharpoons ' }, { t: '→', ins: '\\rightarrow ' },
+  { t: '°C', ins: '^\\circ\\mathrm{C} ' }, { t: '↑', ins: '\\uparrow ' }, { t: '↓', ins: '\\downarrow ' },
+  { t: '≈', ins: '\\approx ' }, { t: '≤', ins: '\\le ' }, { t: '≥', ins: '\\ge ' },
   { t: '单位', ins: '\\ \\mathrm{kJ/mol}' },
 ]
 
@@ -258,10 +271,6 @@ async function boot(document, name) {
           container: tbEl.value,
           texts: CN,
           excludeItems: ['ai', 'document-mode', 'watermark', 'page-number', 'table-of-contents', 'measurement-unit'],
-          customItems: [
-            { id: 'sf-fx', type: 'button', label: '公式', tooltip: '插入化学公式（\\ce{} 写法）', region: 'right', onSelect: openFormula },
-            { id: 'sf-st', type: 'button', label: '结构式', tooltip: '画结构式插进文档（含箭头）', region: 'right', onSelect: openStruct },
-          ],
         },
       },
       onReady: () => { busy.value = false; ready.value = true; const root = tbEl.value && tbEl.value.closest ? tbEl.value.closest('.doce') : host; installCn(root || host); say(`已打开「${name || '空白文档'}」`) },
@@ -269,6 +278,7 @@ async function boot(document, name) {
     }
     if (document) opts.document = document
     sd.value = new SuperDoc(opts)
+    if (typeof window !== 'undefined') window.__sd = sd.value
     current.value = name || ''
   } catch (e) {
     busy.value = false
@@ -411,6 +421,57 @@ async function takeStruct() {
 }
 
 /* ---------------------------------------------------------------- 插图 */
+/** 粘贴：Word 引擎本身不处理图片粘贴，这里接住，走我们自己的插图通道。 */
+async function onPaste(e) {
+  const cd = e && e.clipboardData
+  if (!cd) return
+  const files = Array.from(cd.files || []).filter((f) => /^image\//.test(f.type))
+  if (!files.length) return
+  e.preventDefault()
+  e.stopPropagation()
+  for (const f of files) await insertFile(f)
+}
+
+function pickImages() { imgEl.value && imgEl.value.click() }
+
+async function onPickImages(ev) {
+  const list = Array.from((ev.target && ev.target.files) || [])
+  ev.target.value = ''
+  for (const f of list) await insertFile(f)
+}
+
+function readAsDataUrl(f) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader()
+    r.onload = () => resolve(String(r.result || ''))
+    r.onerror = () => reject(new Error('读不了这张图：文件可能被别的程序占用，或者格式不支持'))
+    r.readAsDataURL(f)
+  })
+}
+
+function imageSize(dataUrl) {
+  return new Promise((resolve) => {
+    const im = new Image()
+    im.onload = () => resolve({ w: im.naturalWidth || 0, h: im.naturalHeight || 0 })
+    im.onerror = () => resolve({ w: 0, h: 0 })
+    im.src = dataUrl
+  })
+}
+
+/** 把一张本地图片（截图/照片）插到光标处；px → pt 用 0.75 折算，宽度上限 430pt。 */
+async function insertFile(f) {
+  if (!ready.value) { fail('文档还在加载，等正文出来再插'); return }
+  try {
+    const data = await readAsDataUrl(f)
+    if (!data) { fail('这张图读不出来，换一张试试'); return }
+    const { w, h } = await imageSize(data)
+    const wpt = w ? Math.min(w * 0.75, 430) : 300
+    const hpt = w && h ? wpt * (h / w) : wpt * 0.6
+    const ok = await insertPng(data, wpt, hpt, f.name || '插图')
+    if (ok) say(`已插入「${f.name || '图片'}」`)
+  } catch (e) { fail(e) }
+}
+
 async function insertPng(dataUrl, wPt, hPt, alt) {
   const ed = sd.value && sd.value.activeEditor
   const doc = ed && ed.doc
@@ -420,13 +481,62 @@ async function insertPng(dataUrl, wPt, hPt, alt) {
   try {
     const res = await doc.create.image({
       src: dataUrl,
-      alt: alt || '插图',
+      alt: `${alt || '插图'}-${Date.now().toString(36)}`,
       size: { width: w, height: Math.max(8, w * ratio), unit: 'pt' },
     })
-    if (res && res.success === false) { fail(res.reason || '插入失败'); return false }
+    if (res && res.success === false) {
+      fail((res.failure && res.failure.message) || res.reason || '插入失败：文档引擎拒收了这张图')
+      return false
+    }
     return true
   } catch (e) { fail(e); return false }
 }
+
+/** 给三栏工作台用：把一段 HTML 写进文档（atEnd=false 时写进当前光标处） */
+/** 等文档接口就绪（编辑器创建后 activeEditor 会晚一点才出现） */
+async function whenReady(ms = 20000) {
+  const t0 = Date.now()
+  for (;;) {
+    const ed = sd.value && sd.value.activeEditor
+    if (ed && ed.doc && ed.doc.insert) return ed
+    if (Date.now() - t0 > ms) return null
+    await new Promise((r) => setTimeout(r, 200))
+  }
+}
+
+async function insertHtml(html, { atEnd = true } = {}) {
+  const ed = await whenReady()
+  const doc = ed && ed.doc
+  if (!doc || !doc.insert) { fail('编辑器还没准备好，等正文出来再试'); return false }
+  try {
+    const input = { value: html, type: 'html' }
+    if (!atEnd && doc.selection && doc.selection.current) {
+      const cur = doc.selection.current()
+      if (cur && cur.target) input.target = cur.target
+    }
+    const res = await doc.insert(input)
+    if (res && res.success === false) {
+      fail((res.failure && res.failure.message) || '写入失败：文档引擎拒收了这段内容')
+      return false
+    }
+    return true
+  } catch (e) { fail(e); return false }
+}
+
+/** 把当前文档导出成 Blob（切换标签、存进题库时用） */
+async function exportBlob(name) {
+  if (!sd.value || !sd.value.export) return null
+  try {
+    return await sd.value.export({ exportType: ['docx'], triggerDownload: false, exportedName: name || 'doc' })
+  } catch (e) { fail(e); return null }
+}
+
+/** 用一份 Blob/File 直接替换当前文档（不经过服务器） */
+async function loadBlob(blob, name) { await boot(blob, name || '') }
+
+function lastError() { return err.value }
+
+defineExpose({ lastError, insertHtml, exportBlob, loadBlob, openByName, insertFile, newBlank, insertImageData: insertPng, isReady: () => ready.value, currentName: () => current.value })
 
 onMounted(load)
 onBeforeUnmount(teardown)

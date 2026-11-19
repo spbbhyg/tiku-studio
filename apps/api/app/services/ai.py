@@ -178,6 +178,105 @@ def save_config(db: Session, *, api_key: str | None = None, base_url: str | None
     return public_config(db)
 
 
+def _probe_models(base_url: str, key: str, timeout: float = 6.0) -> dict:
+    """试探一个 OpenAI 兼容端点能不能用：返回 {ok, models, error}。"""
+    if not base_url:
+        return {"ok": False, "models": [], "error": "还没填接口地址"}
+    url = base_url.rstrip("/") + "/models"
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.get(url, headers={"Authorization": f"Bearer {key}"} if key else {})
+    except httpx.HTTPError as exc:
+        return {"ok": False, "models": [], "error": f"连不上 {base_url}：{type(exc).__name__}（网络不通、地址写错，或者代理软件没开）"}
+    if resp.status_code in (401, 403):
+        return {"ok": False, "models": [], "error": "接口拒绝了这把 Key（401/403）：Key 填错、过期，或者这个 Key 没有这个模型的权限"}
+    if resp.status_code == 404:
+        return {"ok": False, "models": [], "error": f"{base_url} 上没有 /models 接口：多半是地址少写了 /v1（例如 https://api.deepseek.com/v1）"}
+    if resp.status_code >= 400:
+        return {"ok": False, "models": [], "error": f"接口返回 {resp.status_code}"}
+    try:
+        data = resp.json()
+    except Exception as exc:                                  # noqa: BLE001
+        return {"ok": False, "models": [], "error": f"返回的不是 JSON：{exc}"}
+    ids = [str(m.get("id") or "") for m in (data.get("data") or []) if m.get("id")]
+    if not ids:
+        return {"ok": True, "models": [], "error": "接口通了，但没返回模型列表（有的服务不支持 /models，问题不大）"}
+    return {"ok": True, "models": ids, "error": ""}
+
+
+def diagnose(db: Session) -> dict:
+    """AI 自检：把「为什么 AI 用不了」拆成一条条能看懂的中文结论 + 下一步怎么做。"""
+    cfg = _full_config(db)
+    base = (cfg.get("base_url") or "").strip()
+    key = (cfg.get("api_key") or "").strip()
+    model = (cfg.get("model") or "").strip()
+    free_gateway = bool(cfg.get("free_gateway"))
+
+    checks: list[dict] = []
+
+    def add(cid, name, ok, level, detail, fix=""):
+        checks.append({"id": cid, "name": name, "ok": bool(ok), "level": level,
+                       "detail": detail, "fix": fix})
+
+    # 1) 有没有填 Key
+    add("key", "API Key", bool(key), "error" if not key else "ok",
+        f"已配置（{_mask(key)}），通道：{'本机免费网关' if free_gateway else '在线接口'}" if key
+        else "还没填 API Key，所以所有 AI 功能都用不了",
+        "" if key else "到「设置 → AI 模型」填一把 Key（DeepSeek 官网可以申请），或者改用本地千问（不用联网、不用 Key）")
+
+    # 2) 接口连不连得上
+    probe = {"ok": False, "models": [], "error": "没填地址"}
+    if key and base:
+        probe = _probe_models(base, "" if free_gateway else key)
+        add("net", "接口连通性", probe["ok"], "ok" if probe["ok"] else "error",
+            f"{base} 连得上，返回 {len(probe['models'])} 个模型" if probe["ok"] else probe["error"],
+            "" if probe["ok"] else "检查网络、代理，或者把地址改成带 /v1 的完整地址再点一次「测试连接」")
+    else:
+        add("net", "接口连通性", False, "warn", "没有 Key 或没有地址，跳过连通性测试", "")
+
+    # 3) 模型名在不在列表里
+    if probe["ok"] and probe["models"]:
+        hit = model in probe["models"]
+        add("model", "模型名", hit, "ok" if hit else "warn",
+            f"当前用「{model}」，服务端有这个模型" if hit
+            else f"当前写的是「{model}」，但服务端没这个模型名（可能改过名）",
+            "" if hit else f"从下拉里挑一个真实存在的：{', '.join(probe['models'][:5])}")
+
+    # 4) 免费网关（只有开发者环境才有）
+    fkey = dsh_gateway_key()
+    if fkey:
+        fr = list_free_models()
+        add("free", "本机免费模型", bool(fr.get("ok")), "ok" if fr.get("ok") else "warn",
+            f"{DSH_GATEWAY_URL} 可用，{len(fr.get('models') or [])} 个免费模型" if fr.get("ok")
+            else str(fr.get("error") or "免费网关连不上"),
+            "" if fr.get("ok") else "免费模型只在这台开发机上有效；给同事用请填 Key 或用本地千问")
+    else:
+        add("free", "本机免费模型", True, "info",
+            "这台机器没有开发者的免费网关，属正常（正式使用不需要它）", "")
+
+    # 5) 文字识别
+    add("ocr", "图片文字识别（OCR）", _ocr_available(), "ok" if _ocr_available() else "warn",
+        "可用，截图/扫描件能直接转文字" if _ocr_available() else "缺少 rapidocr_onnxruntime，扫描件转不了文字",
+        "" if _ocr_available() else "重装完整版安装包即可（组件已内置）")
+
+    bad = [c for c in checks if c["level"] == "error"]
+    usable = bool(key) and (probe["ok"] if key else False)
+    if usable:
+        advice = f"AI 现在可以用：{model} @ {base}"
+    elif not key:
+        advice = "AI 现在用不了：没有填 API Key。要么填一把 Key，要么用「本地千问」（装好模型就能离线用）"
+    else:
+        advice = "AI 现在用不了：Key 填了，但接口连不上或模型名不对（看下面标红的几条）"
+    return {
+        "usable": usable,
+        "advice": advice,
+        "checks": checks,
+        "errors": len(bad),
+        "config": {"base_url": base, "model": model, "has_key": bool(key),
+                   "free_gateway": free_gateway, "models_seen": len(probe["models"])},
+    }
+
+
 FREE_MODEL_ORDER = [
     "our-free-model/deepseek-v4.1-flash-free",
     "our-free-model/glm-5.3-flash-free",

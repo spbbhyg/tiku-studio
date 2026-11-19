@@ -6,6 +6,72 @@ import AiQuota from '../components/AiQuota.vue'
 import TagsAdmin from './TagsAdmin.vue'
 import { ACTIONS, comboOf, defaults, loadShortcuts, saveShortcuts } from '../shortcuts.js'
 
+
+// ── 本地模型（千问） ──
+const loc = reactive({ installed: false, running: false, exe: '', models: [], tiers: [], error: '', download_url: 'https://ollama.com/download' })
+const pull = ref(null)
+const pullLine = computed(() => (pull.value && (pull.value.line || pull.value.error)) || '正在下载…')
+const locMsg = ref('')
+const locErr = ref('')
+const localBusy = ref(false)
+let pullTimer = 0
+
+async function loadLocal() {
+  locErr.value = ''
+  if (typeof window !== 'undefined') window.__loc = loc
+  try {
+    const r = await api.get('/api/local/status')
+    Object.assign(loc, r)
+    const cur = (r.current && r.current.model) || ''
+    if (pull.value && pull.value.state === 'running') return
+    const hit = (r.tiers || []).find((t) => t.pulled && t.tag === cur)
+    if (hit) locMsg.value = '当前 AI 模型就是本地的 ' + hit.name
+  } catch (e) { locErr.value = api.errText ? api.errText(e) : String(e) }
+}
+
+function reloadLocal() { locMsg.value = ''; loadLocal() }
+
+async function launchLocal() {
+  localBusy.value = true
+  try {
+    const r = await api.post('/api/local/launch', {})
+    if (r.ok) { locMsg.value = r.note; await loadLocal() } else locErr.value = r.note || '启动失败'
+  } catch (e) { locErr.value = api.errText(e) } finally { localBusy.value = false }
+}
+
+async function pullTier(tag) {
+  localBusy.value = true; locErr.value = ''; locMsg.value = ''
+  try {
+    const r = await api.post('/api/local/pull', { tag })
+    if (!r.ok) { locErr.value = r.error || '下载失败'; return }
+    pollPull(tag)
+  } catch (e) { locErr.value = api.errText(e) } finally { localBusy.value = false }
+}
+
+function pollPull(tag) {
+  clearTimeout(pullTimer)
+  const tick = async () => {
+    try {
+      const r = await api.get('/api/local/pull/' + encodeURIComponent(tag))
+      pull.value = r
+      if (r.state === 'done') { locMsg.value = '下好了：' + tag + '。点「用这一档」就能开始用。'; pull.value = null; await loadLocal(); return }
+      if (r.state === 'error') { locErr.value = r.error || '下载失败'; pull.value = null; return }
+    } catch { /* 忽略单次失败 */ }
+    pullTimer = setTimeout(tick, 1500)
+  }
+  tick()
+}
+
+async function useTier(tag) {
+  localBusy.value = true; locErr.value = ''
+  try {
+    const r = await api.post('/api/local/use', { tag })
+    if (r.ok) { locMsg.value = r.note; await loadLocal() } else locErr.value = r.error || '切换失败'
+  } catch (e) { locErr.value = api.errText(e) } finally { localBusy.value = false }
+}
+
+onBeforeUnmount(() => clearTimeout(pullTimer))
+
 const tab = ref('general')          // general | export | ai | keys | cats | tags | persona | guide
 
 // ---------------------------------------------------------------- 导出选项
@@ -216,6 +282,19 @@ const PRESETS = [
   { k: 'custom', name: '自定义（任意 OpenAI 兼容）', base: '', model: '', hint: '自己填 Base URL 与模型名' },
 ]
 const preset = ref('zhipu')
+const dg = ref(null)
+const dgBusy = ref(false)
+const dgErr = ref('')
+async function runDiagnose() {
+  dgBusy.value = true
+  dgErr.value = ''
+  try {
+    dg.value = await api.get('/api/ai/diagnose')
+  } catch (e) {
+    dgErr.value = e?.message || String(e)
+  } finally { dgBusy.value = false }
+}
+
 function applyPreset() {
   const p = PRESETS.find((x) => x.k === preset.value)
   if (!p) return
@@ -485,11 +564,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
   <div class="tabs">
     <button class="tab" :class="{ on: tab === 'general' }" @click="tab = 'general'">常规</button>
     <button class="tab" :class="{ on: tab === 'ai' }" @click="tab = 'ai'">AI 模型</button>
-    <button class="tab" :class="{ on: tab === 'keys' }" @click="tab = 'keys'">快捷键</button>
-    <button class="tab" :class="{ on: tab === 'cats' }" @click="tab = 'cats'">分类</button>
-    <button class="tab" :class="{ on: tab === 'tags' }" @click="tab = 'tags'">标签管理</button>
+    <button class="tab" :class="{ on: tab === 'local' }" @click="tab = 'local'; loadLocal()">本地模型</button>
     <button class="tab" :class="{ on: tab === 'persona' }" @click="tab = 'persona'">AI 助手</button>
-    <button class="tab" :class="{ on: tab === 'export' }" @click="tab = 'export'">导出</button>
     <button class="tab" :class="{ on: tab === 'lan' }" @click="tab = 'lan'">局域网</button>
     <button class="tab" :class="{ on: tab === 'update' }" @click="tab = 'update'">软件更新</button>
     <button class="tab" :class="{ on: tab === 'guide' }" @click="tab = 'guide'">上手指引</button>
@@ -533,7 +609,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
   </div>
 
   <!-- 软件更新 -->
-  <div v-if="tab === 'update'" class="card">
+  <div v-else-if="tab === 'update'" class="card">
     <h3>软件更新</h3>
     <p class="muted" style="margin:4px 0 10px">
       三步：<b>检查更新</b> → <b>下载更新</b> → <b>应用并重启</b>。全程不用登录 GitHub，数据在 <code>data/</code> 里不会被覆盖。
@@ -568,7 +644,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
     </p>
   </div>
 
-  <div v-if="tab === 'guide'" class="card guide">
+  <div v-else-if="tab === 'guide'" class="card guide">
     <h3>五分钟上手</h3>
     <p class="lead">
       这套软件只做三件事：<b>出题</b>（把文献里的题裁进画布、排好版）、<b>存题</b>（存进你本机的化学竞赛题库）、
@@ -590,21 +666,26 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
         <h4>三条最常用的路</h4>
         <table class="route">
           <tr><td class="k">出单题</td><td>出题 → 画布 / 单题</td></tr>
-          <tr><td class="k">出一整卷</td><td>组卷 → 勾题 → 导出</td></tr>
+          <tr><td class="k">出一整卷</td><td>出题 → 整卷（自己的大题）／组卷（从题库勾题）</td></tr>
+          <tr><td class="k">用 Word 改题</td><td>出题 → 文档（三栏：题目文本 / Word / 画布）</td></tr>
           <tr><td class="k">翻题库</td><td>题库 → 搜索 / 按专题翻</td></tr>
         </table>
       </div>
     </div>
 
     <h4>一、出题：把文献里的题变成画布上的版面</h4>
-    <p>出题页左边是画布，右边是工具面板。顶部有一条「出题四步」：</p>
+    <p>
+      出题页有<b>四个模式</b>，右上角切换：<b>画布</b>（自由排版）／<b>单题</b>（纯文字自动排版 A4）／
+      <b>整卷</b>（自己录大题小问、导题目卷+答案卷）／<b>文档</b>（三栏：左题目文本、中 Word、右画布）。
+    </p>
     <ol class="steps">
       <li><b>导入文献</b>：点工具栏的 PDF 按钮，或者直接把 PDF 拖到画布上。右边会显示原页面。</li>
       <li><b>裁图排版</b>：在右边页面上按住拖一个框 →「放大并裁剪」→ 图就进画布了。
         图可以拖着摆位置、拉四角改大小；按住 <kbd>Shift</kbd> 点多个元素可以一起选。</li>
       <li><b>写答案</b>：切到「答案」标签，点「↧ 把题目垫到上面」，题目会<b>整块</b>垫在答案画布顶部（已组合，可整体拖），
         你在它下面直接写解析就行，不用再把题目复制一遍。</li>
-      <li><b>收入题库</b>：点右上角的保存按钮（软盘图标）。题目会直接进本地题库，不再存本软件自己的库。</li>
+      <li><b>收入题库</b>：点右上角保存（软盘图标）→ 弹窗里填<b>出题人</b>（必填）、分类（题库九大专题）、年份、标题
+        →「存进题库」。题目直接进本地题库，不再存本软件自己的库。</li>
     </ol>
     <p class="tip2">
       画布上的小技巧：<b>上色要先选字</b>（拖选中一段文字，再点上面那排色块，立刻变色）；
@@ -617,8 +698,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
       <li>「组卷」页左边按专题浏览题库，或输入关键词跨专题搜；点一行就收进卷子。</li>
       <li>中间是真实 A4 预览：勾一道立刻重排，看到的就是印出来的样子。</li>
       <li>右边填卷名、学校、命题人；页脚留空就自动印「第 X 页 共 Y 页」。</li>
-      <li>「导出 PDF」拿去打印，「导出 Word」拿去改。字体、行距、题号样式在
-        <b>设置 → 导出</b>里统一改。</li>
+      <li>卷名留空就不印标题；分值默认不印，勾「标分值」才印。</li>
+      <li>删题有两种：右栏的「×」只是<b>从卷子里移出</b>；「从题库删除」是<b>真删</b>（要勾确认，删了就没了）。</li>
+      <li>「导出 PDF」拿去打印，「导出 Word」拿去改。</li>
     </ol>
 
     <h4>三、题库：不用离开软件</h4>
@@ -628,16 +710,46 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
       所以它是所有题目的唯一出处——本软件不再自己存一份。
     </p>
 
-    <h4>四、出到一半关掉页面也不会丢</h4>
+    <h4>四、文档模式：像 Word 一样改题</h4>
+    <p>
+      「出题 → 文档」是三栏：<b>左</b>写题目文本，<b>中</b>是真正的 Word（表格、页眉页脚、修订都在），
+      <b>右</b>是画布。左上「«」和右上「»」可以把左右两栏收起，专心写。
+    </p>
+    <ul>
+      <li><b>生成排版稿</b>：左边写完题干/答案，点「生成排版稿 →」，自动排成 Word 段落写进中间文档；</li>
+      <li><b>公式</b>：点顶栏「公式」，写 <code>\ce{...}</code> 或 LaTeX（<code>$K_a$</code>、<code>\frac{}{}</code>），
+        下面有一排希腊字母和常用符号，点「预览」看效果，再「插到光标处」；</li>
+      <li><b>结构式</b>：点「结构式」弹出 Ketcher 画板，画完（含反应箭头）点「取结构并插入」，整块进文档；</li>
+      <li><b>插图</b>：直接 <kbd>Ctrl</kbd>+<kbd>V</kbd> 粘截图，或点「插图」选文件，连插多张都行；</li>
+      <li><b>题目文档 / 答案文档</b>两个标签各自记着自己的内容，来回切不会丢、也不会弹提示；</li>
+      <li>改完点「保存到项目」（存到 <code>data/docx</code>），下次从左上「选一份文档」直接打开。</li>
+    </ul>
+
+    <h4>五、出到一半关掉页面也不会丢</h4>
     <p>
       出题时每 3 秒自动留一份草稿。重新打开出题页，顶部会提示「发现未完成的草稿（时间，N 个元素），要继续吗？」；
       也可以去「草稿」页，那里列着所有没写完的题，能继续写或删掉。点保存进题库后草稿自动清掉。
     </p>
 
-    <h4>五、格式转换</h4>
+    <h4>六、格式转换（四合一）</h4>
     <p>
-      「格式转换」页：Word 拖左边出 PDF，PDF 拖右边出 Word。都在本地转；装了 LibreOffice 会用它对版式更准，
-      没装就用内置渲染（版式近似但文字、图片、表格都在）。
+      「格式转换」页有四件事：<b>文档互转</b>（Word↔PDF）、<b>PDF 拆分</b>（按页码拆，打包成 zip）、
+      <b>PDF 合并</b>（多份合成一份，可调顺序）、<b>扫描件转 Word</b>（OCR 认字，认不出的整页当图片放进去）。
+      全都在这台电脑上转，文件不出门；每一步都会告诉你用了哪个引擎，转坏了可以换一个再试。
+    </p>
+
+    <h4>七、AI 与本地模型</h4>
+    <p>
+      AI 功能都在「AI 工作台」里：<b>智能出题</b>（按级别/知识点出题）、<b>精读文献</b>、
+      <b>小工具</b>（给想法→写题干、翻译并保留公式）、<b>对话</b>、<b>模型与用量</b>。
+    </p>
+    <p>
+      模型两种来源：<b>云端</b>（设置 →「AI 模型」填 Key，或直接用内置免费模型）／
+      <b>本机千问</b>（设置 →「本地模型」，三档 0.5B / 1.5B / 3B，下完断网也能用）。
+      本地档位越高越聪明也越慢，纯 CPU 的电脑建议 0.5B。
+    </p>
+    <p class="tip2">
+      任何功能报错，弹出来的第一行都是中文说明该做什么（比如「连不上本地服务：先确认软件开着」）。
     </p>
 
     <h4>快捷键</h4>
@@ -664,46 +776,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
   </div>
 
   <!-- 导出选项 -->
-  <div v-if="tab === 'export'" class="card">
-    <h3>导出卷子的默认样子</h3>
-    <p class="muted" style="margin:4px 0 12px">
-      这里的设置会用在「组卷」页导出的 PDF 与 Word 上；单题从题库导出时走题库自己的打印页。
-    </p>
-    <div class="exgrid">
-      <label>正文字号（磅）<input v-model.number="exp.font_size" type="number" step="0.5" min="8" max="14" /></label>
-      <label>行距（倍）<input v-model.number="exp.line_height" type="number" step="0.1" min="1" max="2.5" /></label>
-      <label>左右页边距（cm）<input v-model.number="exp.margin_lr" type="number" step="0.1" min="1" max="4" /></label>
-      <label>上下页边距（cm）<input v-model.number="exp.margin_tb" type="number" step="0.1" min="1" max="4" /></label>
-      <label>题号样式
-        <select v-model="exp.numbering">
-          <option value="arabic">阿拉伯数字：1. 2. 3.</option>
-          <option value="cn">中文数字：第一题 第二题</option>
-        </select>
-      </label>
-      <label>答案怎么放
-        <select v-model="exp.answers">
-          <option value="end">答案单独成卷（默认）</option>
-          <option value="inline">每道题后面紧跟答案</option>
-          <option value="none">不出答案</option>
-        </select>
-      </label>
-      <label class="wide">默认页脚
-        <input v-model="exp.footer" placeholder="留空＝第 {page} 页 共 {pages} 页" />
-      </label>
-      <label class="chk"><input v-model="exp.scores" type="checkbox" /> 题号后面标分值</label>
-    </div>
-    <div class="exact">
-      <button class="primary" :disabled="expBusy" @click="saveExport">保存导出设置</button>
-      <button class="ghost" :disabled="expBusy" @click="resetExport">恢复默认</button>
-      <span v-if="expMsg" class="muted">{{ expMsg }}</span>
-    </div>
-    <p class="muted" style="margin-top:10px">
-      能用占位符：<code>{page}</code> 页码、<code>{pages}</code> 总页数。导成 Word 时它们是 Word 的页码域，打印前会自动更新。
-    </p>
-  </div>
+  
 
   <!-- 常规 -->
-  <div v-if="tab === 'general'" class="card">
+  <div v-else-if="tab === 'general'" class="card">
     <h3>数据位置</h3>
     <p class="muted" style="margin:4px 0 10px">
       题库（<code>tiku.db</code>）、题图与原件（<code>library/</code>）都放在这里；试卷 PDF 由浏览器下载，存到你自己选的下载目录。
@@ -834,6 +910,50 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
   </div>
 
   <!-- AI 模型 -->
+  <div v-else-if="tab === 'local'" class="card">
+    <h3>本机千问（不联网也能用）</h3>
+    <p class="muted" style="margin:4px 0 12px">
+      把千问下到本机，断网也能用 AI：写引子、翻译、改错字都行。三档按电脑配置选，换台有显卡的电脑装同一份软件也能跑。
+    </p>
+
+    <div class="locbar">
+      <span class="dot" :class="loc.running ? 'ok' : 'bad'" />
+      <b>{{ loc.running ? '本地模型服务在跑' : (loc.installed ? '本地模型服务没启动' : '这台电脑还没装本地模型引擎') }}</b>
+      <span class="muted" style="margin-left:8px">{{ loc.running ? (loc.models.length + ' 个模型已下载') : (loc.installed ? '点「启动服务」' : '先装 Ollama，再来这里点「重新检查」') }}</span>
+      <span style="flex:1" />
+      <button class="ghost sm" @click="reloadLocal">重新检查</button>
+      <button v-if="loc.installed && !loc.running" class="sm" @click="launchLocal">启动服务</button>
+      <a v-if="!loc.installed" class="btn sm" :href="loc.download_url" target="_blank" rel="noreferrer">下载 Ollama 引擎</a>
+    </div>
+    <p v-if="!loc.installed" class="tip2">
+      装的时候一路下一步就行（不用管理员权限）。装完它会自己常驻，回到这一页点「重新检查」。
+      如果你不想装，也可以继续用上面「AI 模型」页里的云端模型。
+    </p>
+
+    <div class="tiers">
+      <div v-for="t in loc.tiers" :key="t.tag" class="tier" :class="{ got: t.pulled }">
+        <div class="tn"><b>{{ t.name }}</b><span class="sz">{{ t.size_mb }} MB</span></div>
+        <div class="th">{{ t.hint }}</div>
+        <div class="ta">
+          <span v-if="t.pulled" class="ok2">已下载</span>
+          <span v-else-if="pull && pull.tag === t.tag" class="dl">{{ pullLine }}</span>
+          <span v-else class="muted">未下载</span>
+          <span style="flex:1" />
+          <button v-if="!t.pulled && !(pull && pull.tag === t.tag && pull.state === 'running')"
+                  class="sm" :disabled="!loc.installed || localBusy" @click="pullTier(t.tag)">下载</button>
+          <button v-if="t.pulled" class="sm primary" :disabled="localBusy" @click="useTier(t.tag)">用这一档</button>
+        </div>
+      </div>
+    </div>
+
+    <p v-if="locMsg" class="okbox" style="margin-top:10px">{{ locMsg }}</p>
+    <p v-if="locErr" class="errbox" style="margin-top:10px">{{ locErr }}</p>
+    <p class="tip2" style="margin-top:10px">
+      这台电脑是 CPU 推理：0.5B 约 8–12 字/秒，1.5B 约 3–5 字/秒，3B 约 1–2 字/秒。有独立显卡的电脑会自动用显卡，快很多。
+      下载走官方模型仓库，0.5B 约 400MB、1.5B 约 1GB、3B 约 1.9GB，中途关掉窗口也不会白下（已下的部分会保留）。
+    </p>
+  </div>
+
   <div v-else-if="tab === 'ai'" class="card">
     <div class="embcard">
       <div class="embhead">
@@ -853,6 +973,24 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
       <div class="embnote">内置服务是本机自带的一份独立免费模型代理（Node 进程，端口 18903），装好即用、无需登录；网页管理入口见 data/ofm.log。</div>
     </div>
     <AiQuota />
+    <div class="dgcard">
+      <div class="dghead">
+        <b>AI 自检</b>
+        <span class="tag" :class="dg && dg.usable ? 'ok' : 'bad'">{{ dgBusy ? '检查中…' : (dg && dg.usable ? '可用' : (dg ? '不可用' : '未检查')) }}</span>
+        <span class="grow" />
+        <button class="btn" :disabled="dgBusy" @click="runDiagnose">{{ dg ? '重新检查' : '开始自检' }}</button>
+      </div>
+      <p v-if="dg" class="dgadvice" :class="dg.usable ? 'ok' : 'bad'">{{ dg.advice }}</p>
+      <ul v-if="dg" class="dglist">
+        <li v-for="c in dg.checks" :key="c.id" :class="c.level">
+          <span class="ico">{{ c.level === 'ok' ? '✓' : (c.level === 'warn' ? '!' : (c.level === 'error' ? '×' : '·')) }}</span>
+          <b>{{ c.name }}</b>
+          <span class="txt">{{ c.detail }}</span>
+          <div v-if="c.fix" class="fix">怎么办：{{ c.fix }}</div>
+        </li>
+      </ul>
+      <p v-if="dgErr" class="errbox">{{ dgErr }}</p>
+    </div>
     <h3>AI 模型</h3>
     <div v-if="aiInfo.env_override" class="warnbox" style="margin-bottom:10px">
       检测到环境变量 <code>DEEPSEEK_API_KEY</code>，它的优先级高于这里保存的 Key。
@@ -967,21 +1105,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
     </div>
   </div>
 
-  <div v-else-if="tab === 'cats'" class="card">
-    <h3>分类与标签</h3>
-    <p class="muted" style="margin:4px 0 12px">
-      分类维度自己定；标签就是分类里的取值，题库左栏、筛选、组卷都按这里的设置走。
-    </p>
-    <CategoryAdmin />
-  </div>
+  
 
-  <div v-else-if="tab === 'tags'" class="card">
-    <h3>标签管理</h3>
-    <p class="muted" style="margin:4px 0 12px">题库左栏、筛选、组卷都按这里的标签走；默认按「专题」分组，也可以自建分组。</p>
-    <TagsAdmin embedded />
-  </div>
+  
 
-  <div v-else-if="tab === 'persona'" class="card">
+  <div v-if="tab === 'persona'" class="card">
     <h3>AI 助手（小卷）</h3>
     <p class="muted" style="margin:4px 0 12px">首页那个问答框的人格就按这里的设置走，改完保存即可。</p>
     <div class="prow">
@@ -1005,48 +1133,46 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
     </div>
   </div>
 
-  <div v-else-if="tab === 'keys'" class="card">
-    <h3>快捷键</h3>
-    <p class="muted" style="margin:4px 0 12px">
-      点某一行右侧的「设置」，然后直接按你想要的组合键；`Esc` 取消录制。
-      快捷键保存在本机浏览器（localStorage），只影响出题画布。
-    </p>
-    <div v-if="dupWarn.length" class="warnbox" style="margin-bottom:10px">
-      有重复的组合键：{{ dupWarn.join('、') }}，请改掉其中一个。
-    </div>
-    <table class="ktable">
-      <thead>
-        <tr><th>动作</th><th style="width:200px">当前组合键</th><th style="width:150px"></th></tr>
-      </thead>
-      <tbody>
-        <tr v-for="a in ACTIONS" :key="a.key">
-          <td>{{ a.label }}</td>
-          <td>
-            <kbd :class="{ cap: capturing === a.key }">
-              {{ capturing === a.key ? '按下组合键…' : (keys[a.key] || '（未设置）') }}
-            </kbd>
-          </td>
-          <td class="right">
-            <button class="ghost sm" @click="startCapture(a.key)">设置</button>
-            <button class="ghost sm" @click="resetOne(a.key)">默认</button>
-          </td>
-        </tr>
-      </tbody>
-    </table>
-    <div class="btnrow" style="margin-top:12px">
-      <button class="primary" @click="saveKeys">保存快捷键</button>
-      <button class="ghost" @click="resetAll">全部恢复默认</button>
-      <span v-if="ok" style="color:var(--ok)">{{ ok }}</span>
-    </div>
-  </div>
+  
 
   <div v-if="err" class="errbox" style="margin-top:12px">{{ err }}</div>
 </template>
 
 <style scoped>
+.locbar { display: flex; align-items: center; gap: 8px; background: #f8fafc; border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; margin-bottom: 10px; flex-wrap: wrap; }
+.locbar .dot { width: 8px; height: 8px; border-radius: 50%; background: #b7bdc8; }
+.locbar .dot.ok { background: #16a34a; }
+.locbar .dot.bad { background: #ef4444; }
+.locbar a.btn { text-decoration: none; }
+.tiers { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); margin-top: 6px; }
+.tier { border: 1px solid var(--line); border-radius: 12px; padding: 12px; background: #fff; display: flex; flex-direction: column; gap: 6px; }
+.tier.got { border-color: #b8e6c8; background: #fbfffc; }
+.tier .tn { display: flex; align-items: baseline; gap: 8px; }
+.tier .sz { font-size: 12px; color: #98a2b3; }
+.tier .th { font-size: 12.5px; color: #667085; line-height: 1.6; min-height: 40px; }
+.tier .ta { display: flex; align-items: center; gap: 8px; }
+.tier .ok2 { font-size: 12px; color: #16a34a; font-weight: 600; }
+.tier .dl { font-size: 12px; color: #2f6fed; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .prow { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
 .prow > label { width: 84px; flex: none; color: var(--muted); font-size: 13px; padding-top: 8px; }
 .prow input, .prow textarea { flex: 1; max-width: 520px; }
+.dgcard { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin: 0 0 14px; background: #fbfcfe; }
+.dghead { display: flex; align-items: center; gap: 8px; }
+.dghead .grow { flex: 1; }
+.dgadvice { margin: 8px 0 6px; font-size: 13px; line-height: 1.7; }
+.dgadvice.ok { color: #1c8c46; }
+.dgadvice.bad { color: #b42318; }
+.dglist { list-style: none; margin: 0; padding: 0; }
+.dglist li { position: relative; padding: 5px 0 5px 22px; font-size: 12.8px; line-height: 1.7; color: #344054; border-top: 1px dashed #eef1f5; }
+.dglist li:first-child { border-top: 0; }
+.dglist li .ico { position: absolute; left: 2px; top: 5px; font-weight: 700; }
+.dglist li.ok .ico { color: #1c8c46; }
+.dglist li.warn .ico { color: #b54708; }
+.dglist li.error .ico { color: #b42318; }
+.dglist li.info .ico { color: #98a2b3; }
+.dglist li b { margin-right: 6px; }
+.dglist li .fix { margin-top: 2px; color: #b54708; font-size: 12.4px; }
 .aihelpbar { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
 .helpmask { position: fixed; inset: 0; background: rgba(15,23,42,.5); display: flex; align-items: center; justify-content: center; z-index: 80; }
 .helpcard { width: min(760px, 92vw); max-height: 86vh; background: #fff; border-radius: 14px; display: flex; flex-direction: column; overflow: hidden; }

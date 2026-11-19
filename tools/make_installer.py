@@ -238,11 +238,17 @@ def header() -> bytes:
 
 
 def make_zip(src: Path, out: Path) -> None:
-    """把 src 目录打成 zip（优先 7z，压得快）。"""
+    """把 src 目录打成 zip（优先 7z，压得快；7z 在大目录上会抽风，失败就换 zipfile）。"""
     if SEVENZIP.is_file():
         cmd = [str(SEVENZIP), "a", "-tzip", "-mx=1", "-bso0", "-bsp0", str(out), "."]
-        subprocess.run(cmd, cwd=str(src), check=True)
-        return
+        r = subprocess.run(cmd, cwd=str(src))
+        if r.returncode == 0 and out.is_file() and out.stat().st_size > 1024:
+            return
+        print(f"  7z 失败（退出码 {r.returncode}），改用 Python zipfile 重压，慢一点但稳")
+        try:
+            out.unlink()
+        except OSError:
+            pass
     print("  （没装 7-Zip，用 Python 的 zipfile，会慢一点）")
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as zf:
         for p in src.rglob("*"):

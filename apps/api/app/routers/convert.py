@@ -67,6 +67,9 @@ def engines() -> dict:
         "pdf2docx": _has("pdf2docx"),
         "docx": True,
         "pymupdf": _has("pymupdf") or _has("fitz"),
+        "pypdf": _has("pypdf"),
+        "pikepdf": _has("pikepdf"),
+        "ocr": _has("rapidocr_onnxruntime"),
     }
 
 
@@ -507,6 +510,16 @@ def _stem(name: str) -> str:
     return quote(base)
 
 
+async def _read(file: UploadFile) -> bytes:
+    """读上传文件（限制 200MB，超了直接给中文提示）。"""
+    if file is None:
+        raise HTTPException(400, "没有收到文件")
+    blob = await file.read()
+    if len(blob) > 200 * 1024 * 1024:
+        raise HTTPException(413, "文件太大了（超过 200MB），先拆开再转")
+    return blob
+
+
 @router.post("/docx2pdf")
 async def api_docx2pdf(file: UploadFile = File(...)):
     blob = await _read(file)
@@ -532,6 +545,273 @@ async def api_pdf2docx(file: UploadFile = File(...)):
         out, engine = await run_in_threadpool(pdf_to_docx, blob)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(500, f"转 Word 失败：{exc or type(exc).__name__}") from exc
+    return Response(out, media_type=DOCX_MIME, headers={
+        "Content-Disposition": f"attachment; filename*=UTF-8''{_stem(file.filename)}.docx",
+        "X-Engine": engine,
+    })
+
+
+# ------------------------------------------------------------------ PDF 拆分 / 合并
+def _pages_spec(spec: str, total: int) -> list[int]:
+    """'1-3,5,8-' → [0,1,2,4,7,8,...]（1 起，支持开区间与逗号）。"""
+    text = str(spec or "").replace("，", ",").replace(" ", "")
+    if not text:
+        raise ValueError("请先写页码范围，例如 1-3,5")
+    out: list[int] = []
+    for chunk in text.split(","):
+        if not chunk:
+            continue
+        if "-" in chunk:
+            a, _, b = chunk.partition("-")
+            start = int(a) if a.strip() else 1
+            end = int(b) if b.strip() else total
+        else:
+            start = end = int(chunk)
+        if start < 1 or end > total or start > end:
+            raise ValueError(f"页码范围 {chunk} 不对（这份 PDF 一共 {total} 页）")
+        out.extend(range(start - 1, end))
+    seen: list[int] = []
+    for i in out:
+        if i not in seen:
+            seen.append(i)
+    return seen
+
+
+def _pdf_split_pypdf(blob: bytes, pages: list[int]) -> bytes:
+    from pypdf import PdfReader, PdfWriter
+
+    reader = PdfReader(io.BytesIO(blob))
+    writer = PdfWriter()
+    for i in pages:
+        writer.add_page(reader.pages[i])
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+def _pdf_split_pymupdf(blob: bytes, pages: list[int]) -> bytes:
+    import pymupdf
+
+    src = pymupdf.open(stream=blob, filetype="pdf")
+    out = pymupdf.open()
+    for i in pages:
+        out.insert_pdf(src, from_page=i, to_page=i)
+    data = out.tobytes()
+    out.close()
+    src.close()
+    return data
+
+
+def pdf_split(blob: bytes, spec: str) -> tuple[bytes, str, int]:
+    """按页码范围拆成多个 PDF，打包成 ZIP 返回。spec='each' 表示一页一个。"""
+    import zipfile
+
+    from pypdf import PdfReader
+
+    total = len(PdfReader(io.BytesIO(blob)).pages)
+    spec = str(spec or "").strip()
+    groups: list[tuple[int, list[int]]] = []
+    if spec.lower() in ("each", "逐页", "每页"):
+        groups = [(i + 1, [i]) for i in range(total)]
+    else:
+        groups = [(0, _pages_spec(spec, total))]
+    zbuf = io.BytesIO()
+    engine = "pypdf"
+    with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for _, pages in groups:
+            try:
+                data = _pdf_split_pypdf(blob, pages)
+            except Exception:  # noqa: BLE001
+                data = _pdf_split_pymupdf(blob, pages)
+                engine = "pymupdf"
+            if len(pages) == 1:
+                label = f"p{pages[0] + 1}"
+            else:
+                label = f"p{pages[0] + 1}-{pages[-1] + 1}"
+            zf.writestr(f"{label}.pdf", data)
+    return zbuf.getvalue(), engine, len(groups)
+
+
+def pdf_merge(blobs: list[bytes]) -> tuple[bytes, str]:
+    import pymupdf
+
+    try:
+        from pypdf import PdfReader, PdfWriter
+
+        writer = PdfWriter()
+        for blob in blobs:
+            for page in PdfReader(io.BytesIO(blob)).pages:
+                writer.add_page(page)
+        buf = io.BytesIO()
+        writer.write(buf)
+        return buf.getvalue(), "pypdf"
+    except Exception:  # noqa: BLE001
+        out = pymupdf.open()
+        for blob in blobs:
+            src = pymupdf.open(stream=blob, filetype="pdf")
+            out.insert_pdf(src)
+            src.close()
+        data = out.tobytes()
+        out.close()
+        return data, "pymupdf"
+
+
+def _is_cjk(ch: str) -> bool:
+    if not ch:
+        return False
+    o = ord(ch)
+    return 0x2E80 <= o <= 0x9FFF or 0xFF00 <= o <= 0xFFEF
+
+
+def _ocr_page_lines(page) -> list[str]:
+    """OCR 一页，按行合并成自然段（坐标是 0..1 的归一化值）。"""
+    import numpy as np
+    import pymupdf
+
+    pix = page.get_pixmap(matrix=pymupdf.Matrix(2.2, 2.2), alpha=False)
+    try:
+        arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    except Exception:  # noqa: BLE001
+        return []
+    try:
+        from ..services.ai import _ocr_array  # 复用同一套 OCR
+    except Exception:  # noqa: BLE001
+        return []
+    lines = _ocr_array(arr, pix.width, pix.height) or []
+    rows = sorted(lines, key=lambda x: (round(float(x.get("y0") or 0), 3), float(x.get("x0") or 0)))
+    merged: list[str] = []
+    last_y = None
+    last_x = None
+    last_right = None
+    for row in rows:
+        t = str(row.get("text") or "").strip()
+        if not t:
+            continue
+        y = float(row.get("y0") or 0)
+        x = float(row.get("x0") or 0)
+        newpara = True
+        if merged and last_y is not None:
+            gap = y - last_y
+            same_col = last_x is not None and abs(x - last_x) < 0.08
+            end_punct = merged[-1][-1:] in "。！？；：…"
+            short = last_right is not None and last_right < 0.8
+            newpara = gap > 0.045 or not same_col or end_punct or (short and gap > 0.02)
+        if newpara:
+            merged.append(t)
+        else:
+            tail = merged[-1][-1:]
+            merged[-1] = merged[-1] + ("" if _is_cjk(tail) else " ") + t
+        last_y = y
+        last_x = x
+        last_right = float(row.get("x1") or 0)
+    return merged
+
+
+def pdf_ocr_docx(blob: bytes, max_pages: int = 40) -> tuple[bytes, str]:
+    """扫描版 PDF：逐页 OCR 认字排成 Word；认不出的页整页贴图，内容不丢。"""
+    import pymupdf
+    from docx import Document
+    from docx.oxml.ns import qn
+    from docx.shared import Cm, Pt
+
+    doc = pymupdf.open(stream=blob, filetype="pdf")
+    out = Document()
+    sec = out.sections[0]
+    sec.left_margin = sec.right_margin = Cm(2.0)
+    sec.top_margin = sec.bottom_margin = Cm(1.8)
+    normal = out.styles["Normal"]
+    normal.font.name = "宋体"
+    normal.font.size = Pt(11)
+    try:
+        normal.element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), "宋体")
+    except Exception:  # noqa: BLE001
+        pass
+
+    pages = min(doc.page_count, max_pages)
+    ok = 0
+    for idx in range(pages):
+        page = doc[idx]
+        text = (page.get_text() or "").strip()
+        if len(text) >= 40:
+            for line in text.splitlines():
+                if line.strip():
+                    out.add_paragraph(line.strip())
+            ok += 1
+        else:
+            lines = _ocr_page_lines(page)
+            if lines:
+                for line in lines:
+                    out.add_paragraph(line)
+                ok += 1
+            else:
+                import tempfile
+
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(2.2, 2.2), alpha=False)
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
+                    fh.write(pix.tobytes("png"))
+                    tmp = fh.name
+                try:
+                    out.add_picture(tmp, width=Cm(16.6))
+                finally:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+        if idx < pages - 1:
+            out.add_page_break()
+
+    buf = io.BytesIO()
+    out.save(buf)
+    return buf.getvalue(), f"rapidocr({ok}/{pages} pages editable)"
+
+
+@router.post("/pdf-split")
+async def api_pdf_split(file: UploadFile = File(...), pages: str = ""):
+    blob = await _read(file)
+    if b"%PDF" not in blob[:1024]:
+        raise HTTPException(400, "这不是 PDF 文件")
+    try:
+        data, engine, n = await run_in_threadpool(pdf_split, blob, pages)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"拆分失败：{exc or type(exc).__name__}") from exc
+    return Response(data, media_type="application/zip", headers={
+        "Content-Disposition": f"attachment; filename*=UTF-8''{_stem(file.filename)}-split.zip",
+        "X-Engine": engine,
+        "X-Parts": str(n),
+    })
+
+
+@router.post("/pdf-merge")
+async def api_pdf_merge(files: list[UploadFile] = File(...)):
+    blobs: list[bytes] = []
+    for f in files or []:
+        blob = await _read(f)
+        if b"%PDF" not in blob[:1024]:
+            raise HTTPException(400, f"{f.filename} 不是 PDF 文件")
+        blobs.append(blob)
+    if len(blobs) < 2:
+        raise HTTPException(400, "合并至少要两个 PDF")
+    try:
+        data, engine = await run_in_threadpool(pdf_merge, blobs)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"合并失败：{exc or type(exc).__name__}") from exc
+    return Response(data, media_type="application/pdf", headers={
+        "Content-Disposition": "attachment; filename*=UTF-8''merged.pdf",
+        "X-Engine": engine,
+    })
+
+
+@router.post("/pdf2docx-ocr")
+async def api_pdf2docx_ocr(file: UploadFile = File(...)):
+    blob = await _read(file)
+    if b"%PDF" not in blob[:1024]:
+        raise HTTPException(400, "这不是 PDF 文件")
+    try:
+        out, engine = await run_in_threadpool(pdf_ocr_docx, blob)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"扫描件转 Word 失败：{exc or type(exc).__name__}") from exc
     return Response(out, media_type=DOCX_MIME, headers={
         "Content-Disposition": f"attachment; filename*=UTF-8''{_stem(file.filename)}.docx",
         "X-Engine": engine,

@@ -20,15 +20,61 @@ const previewBusy = ref(false)
 const zoom = ref(1)
 
 const opt = reactive({
-  title: '化学竞赛练习卷',
+  title: '',
   school: '',
   reviewer: localStorage.getItem('tiku-author-name') || '',
   footer: '',
   answers: false,
-  scores: true,
+  scores: false,
 })
 
 const ids = computed(() => picked.value.map(p => p.id))
+const selOn = ref(false)
+const selIds = ref([])
+const delBusy = ref(false)
+const dmsg = ref('')
+const allSel = computed(() => hits.value.length > 0 && hits.value.every(h => selIds.value.includes(h.id)))
+
+function toggleSelMode() {
+  selOn.value = !selOn.value
+  if (!selOn.value) selIds.value = []
+}
+function toggleSel(id) {
+  const i = selIds.value.indexOf(id)
+  if (i >= 0) selIds.value.splice(i, 1)
+  else selIds.value.push(id)
+}
+function toggleAll() {
+  selIds.value = allSel.value ? [] : hits.value.map(h => h.id)
+}
+async function delSelected() {
+  const n = selIds.value.length
+  if (!n) return
+  if (!window.confirm(`确定从本地题库里删除这 ${n} 道题吗？删了就找不回来了。`)) return
+  await doDelete([...selIds.value], `已从题库删除 ${n} 道`)
+}
+async function delOne(p) {
+  if (!window.confirm(`确定从本地题库里删除「${p.title || p.id}」吗？删了就找不回来了。`)) return
+  await doDelete([p.id], `已从题库删除「${p.title || p.id}」`)
+}
+async function doDelete(list, okMsg) {
+  delBusy.value = true
+  try {
+    const r = await api.post('/api/chemy/delete', { ids: list, confirm: '删除' })
+    picked.value = picked.value.filter(p => !list.includes(p.id))
+    if (r && r.failed && r.failed.length) {
+      window.alert('有 ' + r.failed.length + ' 道没删掉：' + r.failed.map(f => f.error).join('；'))
+    } else {
+      dmsg.value = okMsg
+    }
+    selIds.value = []
+    await search()
+  } catch (e) {
+    window.alert('删除失败：' + (e && e.message ? e.message : e))
+  } finally {
+    delBusy.value = false
+  }
+}
 const totalScore = ref(0)
 
 async function loadTopics() {
@@ -166,10 +212,20 @@ onMounted(async () => {
         </select>
         <button class="ghost sm" :disabled="busy" @click="search">{{ busy ? '搜索中' : '搜索' }}</button>
       </div>
-      <div class="hints">找到 {{ hits.length }} 道；点一行就加进卷子（右边可调顺序）</div>
+      <div class="hints">
+        <span>找到 {{ hits.length }} 道；点一行就加进卷子（右边可调顺序）</span>
+        <button class="ghost xs" :class="{ on: selOn }" @click="toggleSelMode">{{ selOn ? '退出多选' : '多选删除' }}</button>
+      </div>
+      <div v-if="dmsg" class="dnote">{{ dmsg }}</div>
+      <div v-if="selOn" class="selbar">
+        <label class="kb"><input type="checkbox" :checked="allSel" @change="toggleAll" /> 全选本页</label>
+        <span class="mut">已选 {{ selIds.length }} 道</span>
+        <button class="danger xs" :disabled="!selIds.length || delBusy" @click="delSelected">{{ delBusy ? '删除中' : '从题库删除' }}</button>
+      </div>
       <div class="list">
-        <div v-for="h in hits" :key="h.id" class="hit" :class="{ on: isPicked(h.id) }" @click="toggle(h)">
-          <span class="ck">{{ isPicked(h.id) ? '✓' : '' }}</span>
+        <div v-for="h in hits" :key="h.id" class="hit" :class="{ on: isPicked(h.id), sel: selOn && selIds.includes(h.id) }"
+             @click="selOn ? toggleSel(h.id) : toggle(h)">
+          <span class="ck">{{ selOn ? (selIds.includes(h.id) ? '✓' : '') : (isPicked(h.id) ? '✓' : '') }}</span>
           <span class="ht">
             <b>{{ h.title || h.id }}</b>
             <i>{{ h.topic_name }}<template v-if="h.year"> · {{ h.year }}</template></i>
@@ -205,7 +261,7 @@ onMounted(async () => {
     <!-- 右：版式 / 页脚 / 导出 -->
     <section class="col right">
       <div class="chead">版式与页脚</div>
-      <label class="f"><span>卷名</span><input v-model="opt.title" /></label>
+      <label class="f"><span>卷名（可留空：空着就不印标题）</span><input v-model="opt.title" placeholder="留空 = 不印标题" /></label>
       <label class="f"><span>学校</span><input v-model="opt.school" placeholder="选填：印在页眉/页脚" /></label>
       <label class="f"><span>命题人</span><input v-model="opt.reviewer" placeholder="选填" /></label>
       <label class="f"><span>页脚</span>
@@ -220,7 +276,8 @@ onMounted(async () => {
           <span class="nm">{{ p.title }}</span>
           <button class="mini" title="上移" :disabled="i === 0" @click="move(i, -1)">↑</button>
           <button class="mini" title="下移" :disabled="i === picked.length - 1" @click="move(i, 1)">↓</button>
-          <button class="mini" title="移出" @click="toggle({ id: p.id })">×</button>
+          <button class="mini" title="移出卷子（不删题库）" @click="toggle({ id: p.id })">×</button>
+          <button class="mini danger" title="从题库真删这道题" :disabled="delBusy" @click="delOne(p)">删</button>
         </div>
         <div v-if="!picked.length" class="none">还没选题</div>
         <button v-if="picked.length" class="ghost sm wide" @click="clearAll">全部清空</button>
@@ -245,6 +302,14 @@ onMounted(async () => {
 .cnt { font-weight: 400; color: #667085; font-size: 12px; }
 .filter { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px 6px; }
 .kw, .tp, .f input { height: 30px; border: 1px solid #e4e7ec; border-radius: 8px; padding: 0 8px; font-size: 13px; }
+.hints { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.selbar { display: flex; align-items: center; gap: 10px; padding: 6px 8px; background: #fff6f6; border: 1px solid #ffd6d6; border-radius: 8px; font-size: 12px; }
+.selbar .kb { display: inline-flex; align-items: center; gap: 4px; }
+.hit.sel { outline: 1px dashed #2f6fed; }
+.mini.danger { color: #b42318; border-color: #ffd6d6; }
+.danger.xs { color: #b42318; }
+.xs { height: 24px; padding: 0 8px; font-size: 12px; }
+.dnote { font-size: 12px; color: #1c8c46; padding: 2px 4px; }
 .hints { padding: 0 12px 6px; font-size: 11.5px; color: #98a2b3; }
 .list { flex: 1; overflow: auto; padding: 0 8px 8px; }
 .hit { display: flex; gap: 8px; align-items: flex-start; padding: 7px 8px; border-radius: 8px; cursor: pointer; }

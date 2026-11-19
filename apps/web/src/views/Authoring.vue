@@ -11,7 +11,7 @@ import { extractFromFrame } from '../ketcherSvg.js'
 import Icon from '../components/Icon.vue'
 import TextMode from '../components/TextMode.vue'
 import ExamHome from './ExamHome.vue'
-import DocEditorPane from '../components/DocEditorPane.vue'
+import DocDesk from '../components/DocDesk.vue'
 
 const drawer = ref('')            // '' | 'formula' | 'struct' | 'pdf' | 'subs'
 
@@ -860,9 +860,17 @@ async function publishToBank() {
   if (!ql || !ql.blocks.length) { err.value = '题目画布是空的：先裁剪或写点文字'; return null }
   const author = requireAuthor()
   if (!author) return null
+  const al = aPane.value ? aPane.value.getLayout() : null
   const stem = layoutText(ql)
-  const answer = layoutText(aPane.value ? aPane.value.getLayout() : null) || form.answer || ''
-  const images = await layoutImages(ql)
+  let answer = layoutText(al) || form.answer || ''
+  // 题库的答案只有文字，没有图片字段：答案画布上的图并进题图，答案文本里写清楚是第几张
+  const qImgs = await layoutImages(ql)
+  const aImgs = await layoutImages(al)
+  const images = [...qImgs, ...aImgs]
+  if (aImgs.length) {
+    const notes = aImgs.map((_, i) => `答案配图见题图 ${qImgs.length + i + 1}`)
+    answer = [answer, ...notes].filter(Boolean).join(String.fromCharCode(10))
+  }
   const firstLine = (stem.split('\n')[0] || '').slice(0, 40)
   return api.post('/api/chemy/publish', {
     title: form.source_title || firstLine || '未命名题目',
@@ -873,7 +881,49 @@ async function publishToBank() {
   })
 }
 
-async function save() {
+const TOPIC_CN = {
+  organic: '有机化学', polymer: '高分子化学', crystal: '晶体化学',
+  'inorg-struct': '无机综合与结构推断', equation: '方程式与元素化学', thermo: '热力学与化学平衡',
+  electro: '电化学', kinetics: '动力学', analytical: '分析化学',
+}
+function topicName(t) { return TOPIC_CN[String(t || 'organic')] || '有机化学' }
+
+const inbank = reactive({ open: false, author: '', topic: 'organic', year: '', title: '', busy: false, err: '', then: 'save' })
+
+function openInbank(then = 'save') {
+  inbank.author = String(form.author || localStorage.getItem('tiku-author-name') || '').trim()
+  inbank.topic = String(form.topic || 'organic')
+  inbank.year = form.year ? String(form.year) : ''
+  inbank.title = String(form.source_title || '')
+  inbank.err = ''
+  inbank.busy = false
+  inbank.then = then
+  inbank.open = true
+}
+
+/** 弹窗里确认：把填写的东西写回 form，再真正入库 */
+async function confirmInbank() {
+  const a = String(inbank.author || '').trim()
+  if (!a) { inbank.err = '出题人必填：入库的题目要能追到是谁出的'; return }
+  form.author = a
+  form.topic = inbank.topic
+  form.year = inbank.year === '' ? null : Number(inbank.year)
+  form.source_title = String(inbank.title || '')
+  rememberAuthor()
+  inbank.busy = true
+  inbank.err = ''
+  try {
+    if (inbank.then === 'export') await saveAndExport(true)
+    else await save(true)
+    if (!err.value) inbank.open = false
+    else inbank.err = err.value
+  } catch (e2) {
+    inbank.err = e2?.message || String(e2)
+  } finally { inbank.busy = false }
+}
+
+async function save(fromDialog = false) {
+  if (!fromDialog && !String(form.author || '').trim()) { openInbank('save'); return }
   saving.value = true
   err.value = ''
   msg.value = ''
@@ -891,7 +941,8 @@ async function save() {
 }
 
 // 导出 = 先入库，再按题库的方式出打印页（本项目的导出器不用）
-async function saveAndExport() {
+async function saveAndExport(fromDialog = false) {
+  if (!fromDialog && !String(form.author || '').trim()) { openInbank('export'); return }
   saving.value = true
   err.value = ''
   msg.value = ''
@@ -1513,10 +1564,10 @@ onBeforeUnmount(() => {
       <button class="wt" :disabled="!canUndo" title="撤销（Ctrl+Z）" @click="undo"><Icon name="undo" /></button>
       <button class="wt" :disabled="!canRedo" title="重做（Ctrl+Shift+Z）" @click="redo"><Icon name="redo" /></button>
       <span class="wsep" />
-      <button class="wt go" :disabled="saving" :title="'保存：直接存进本地题库（要填出题人）'" @click="save">
+      <button class="wt go" :disabled="saving" :title="'保存：直接存进本地题库（要填出题人）'" @click="save()">
         <Icon name="save" />
       </button>
-      <button class="wt" :disabled="saving" title="导出：先存进本地题库，再打开题库的打印页" @click="saveAndExport">
+      <button class="wt" :disabled="saving" title="导出：先存进本地题库，再打开题库的打印页" @click="saveAndExport()">
         <Icon name="download" />
       </button>
       <span v-if="draftAt" class="draftat" title="出题过程自动留草稿，关掉页面也不会丢">草稿已存 {{ draftAt.slice(11) }}</span>
@@ -1703,72 +1754,15 @@ onBeforeUnmount(() => {
       </div>
       <div v-if="auxOpen" class="auxbody">
         <div class="aux">
-          <label class="f req"><span>出题人 *</span>
-            <input v-model="form.author" placeholder="必填：入库后要能追到是谁出的" @change="rememberAuthor" />
-          </label>
-          <div class="cols2">
-            <label class="f"><span>专题（题库）</span>
-              <select v-model="form.topic">
-                <option value="organic">有机化学</option>
-                <option value="polymer">高分子化学</option>
-                <option value="crystal">晶体化学</option>
-                <option value="inorg-struct">无机综合与结构推断</option>
-                <option value="equation">方程式与元素化学</option>
-                <option value="thermo">热力学与化学平衡</option>
-                <option value="electro">电化学</option>
-                <option value="kinetics">动力学</option>
-                <option value="analytical">分析化学</option>
-              </select>
-            </label>
-            <label class="f"><span>年份（可空）</span>
-              <input v-model="form.year" type="number" min="1990" max="2100" placeholder="如 2024" />
-            </label>
-          </div>
-          <label class="f"><span>书册（本机标记，仅参考）</span>
-            <select v-model="form.book_id">
-              <option v-for="b in meta.books" :key="b.id" :value="b.id">{{ b.title }}</option>
-            </select>
-          </label>
-          <label class="f"><span>单元（可选）</span>
-            <select v-model="form.unit_id">
-              <option :value="null">不指定</option>
-              <option v-for="u in units" :key="u.id" :value="u.id">{{ u.name }}</option>
-            </select>
-          </label>
-          <div class="cols2">
-            <label class="f"><span>题型</span>
-              <select v-model="form.q_type">
-                <option v-for="t in meta.qtypes" :key="t" :value="t">{{ t }}</option>
-              </select>
-            </label>
-            <label class="f"><span>难度</span>
-              <select v-model.number="form.difficulty">
-                <option :value="1">基础</option><option :value="2">中等</option><option :value="3">较难</option>
-              </select>
-            </label>
-          </div>
-          <label class="f"><span>文献 / 教材 / 试卷</span>
-            <input v-model="form.source_title" placeholder="论文名、书名或试卷名" />
-          </label>
-          <label class="f"><span>出处（作者·期刊·年份）</span>
-            <input v-model="form.source_citation" placeholder="如：张三. 某研究[J]. 某学报, 2024, 12(3): 45-67" />
-          </label>
-          <label class="f"><span>位置（页码 / 题号）</span>
-            <input v-model="form.locator" placeholder="如：p.128 / 第 3 题" />
-          </label>
-          <div class="f">
-            <span>标签（去「设置 → 标签管理」维护）</span>
-            <div class="tags">
-              <button v-for="t in meta.tags" :key="t.id" class="chip"
-                      :class="{ on: form.tags.includes(t.name) }" @click="pickTag(t.name)">{{ t.name }}</button>
+          <div class="metabox">
+            <div class="metal">
+              <span>出题人</span><b>{{ form.author || '未填' }}</b>
+              <span>专题</span><b>{{ topicName(form.topic) }}</b>
+              <span>年份</span><b>{{ form.year || '—' }}</b>
+              <span>标题</span><b>{{ form.source_title || '自动取题干首行' }}</b>
             </div>
+            <button class="ghost" @click="openInbank">填入库信息 / 入库…</button>
           </div>
-          <label class="f"><span>状态</span>
-            <select v-model="form.status">
-              <option value="confirmed">已确认</option>
-              <option value="draft">草稿</option>
-            </select>
-          </label>
           <label class="f"><span>题干文字（给 AI 读；扫描图/图片题可把题目粘贴到这里）</span>
             <textarea v-model="aiStem" rows="3" placeholder="例如：第1题 多芳甲烷隐色体化学（21分）1-1 … 1-2 …（也可留空，AI 会读题目画布里的文字块）"></textarea>
           </label>
@@ -1797,6 +1791,48 @@ onBeforeUnmount(() => {
             </button>
             <div class="hint">点「出题」先选出几道；生成后逐题显示在画布上，改完点右上角「出下一个题」，全部完成自动成卷，不写题库。</div>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="inbank.open" class="imask" @click.self="inbank.open = false">
+      <div class="icard">
+        <div class="ihead">
+          <b>存进本地题库</b>
+          <span class="mut">题目的分类与出题人都记在题库里，以后好查</span>
+          <button class="icon" title="关闭" @click="inbank.open = false">×</button>
+        </div>
+        <label class="if"><span>出题人 *</span>
+          <input v-model="inbank.author" placeholder="必填：入库后要能追到是谁出的" />
+        </label>
+        <div class="irow">
+          <label class="if"><span>分类（题库九大专题）</span>
+            <select v-model="inbank.topic">
+              <option value="organic">有机化学</option>
+              <option value="polymer">高分子化学</option>
+              <option value="crystal">晶体化学</option>
+              <option value="inorg-struct">无机综合与结构推断</option>
+              <option value="equation">方程式与元素化学</option>
+              <option value="thermo">热力学与化学平衡</option>
+              <option value="electro">电化学</option>
+              <option value="kinetics">动力学</option>
+              <option value="analytical">分析化学</option>
+            </select>
+          </label>
+          <label class="if small"><span>年份（可空）</span>
+            <input v-model="inbank.year" type="number" min="1990" max="2100" placeholder="如 2024" />
+          </label>
+        </div>
+        <label class="if"><span>标题</span>
+          <input v-model="inbank.title" placeholder="留空就取题干第一行" />
+        </label>
+        <p class="ihint">题目从题目画布取文字和图片，答案从答案画布取文字（答案里的图会并进题图，并在答案里标「见题图 N」）。</p>
+        <p v-if="inbank.err" class="errbox">{{ inbank.err }}</p>
+        <div class="ibtn">
+          <button class="ghost" @click="inbank.open = false">取消</button>
+          <button class="primary" :disabled="inbank.busy" @click="confirmInbank">
+            {{ inbank.busy ? '正在存…' : '存进题库' }}
+          </button>
         </div>
       </div>
     </div>
@@ -1860,7 +1896,7 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="wbody dmode" v-show="editMode === 'doc'">
-      <DocEditorPane />
+      <DocDesk />
     </div>
 
     <div v-if="pop.open" class="textpop" :style="{ left: pop.x + 'px', top: pop.y + 'px' }"
@@ -1944,6 +1980,22 @@ onBeforeUnmount(() => {
 .wbody.pmode { padding: 0; overflow: auto; }
 .wbody.dmode { padding: 0; overflow: hidden; }
 .pmwrap { padding: 18px 22px 40px; }
+.metabox { display: flex; flex-direction: column; gap: 6px; padding-bottom: 6px; border-bottom: 1px dashed var(--line); margin-bottom: 8px; }
+.metal { display: flex; flex-wrap: wrap; gap: 4px 8px; font-size: 12px; color: #667085; }
+.metal b { color: #344054; font-weight: 600; }
+.imask { position: fixed; inset: 0; background: rgba(16, 24, 40, .32); display: flex; align-items: center; justify-content: center; z-index: 300; }
+.icard { width: 520px; max-width: calc(100vw - 40px); background: #fff; border-radius: 14px; padding: 16px 18px 14px; box-shadow: 0 18px 60px rgba(16, 24, 40, .22); }
+.ihead { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
+.ihead .mut { font-size: 12px; color: #98a2b3; flex: 1; }
+.ihead .icon { border: 0; background: transparent; font-size: 18px; cursor: pointer; color: #98a2b3; }
+.if { display: block; margin-bottom: 10px; }
+.if > span { display: block; font-size: 12px; color: #667085; margin-bottom: 4px; }
+.if input, .if select { width: 100%; height: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
+.if.small { width: 150px; }
+.irow { display: flex; gap: 10px; align-items: flex-end; }
+.irow .if:first-child { flex: 1; }
+.ihint { margin: 2px 0 12px; font-size: 12px; color: #98a2b3; line-height: 1.7; }
+.ibtn { display: flex; justify-content: flex-end; gap: 8px; }
 .stepbar {
   display: flex; align-items: center; gap: 6px; margin-bottom: 8px;
   background: #fff; border: 1px solid var(--line, #e7ebf2); border-radius: 12px;

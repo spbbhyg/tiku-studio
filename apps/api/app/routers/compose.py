@@ -29,13 +29,13 @@ MAX_FIG_W = 418.0            # 版心 424pt，图最多铺满正文宽（原来�
 
 class ComposeIn(BaseModel):
     ids: list[str] = Field(default_factory=list)
-    title: str = "化学竞赛练习卷"
+    title: str = ""
     subtitle: str = ""
     school: str = ""
     reviewer: str = ""
     footer: str = ""                  # 支持 {page} / {pages}
     answers: bool = False             # 预览时同时显示答案
-    scores: bool = True               # 题号后面跟分值
+    scores: bool = False               # 题号后面跟分值
     part: str = "questions"           # questions | answers | all
     opts: dict[str, Any] = {}         # 导出选项（字体/行距/页边距/答案位置…），空则取设置
 
@@ -141,14 +141,24 @@ def _doc(o: ComposeIn, items: list[dict]) -> dict:
         (o.school or "").strip() and f"学校：{o.school.strip()}",
         (o.subtitle or "").strip(),
     ] if x)
+    # 卷面统一：正文宋体 12 号；不自动加标题、不自动标分值（用户第 3-2 条）
+    tpl = {
+        "font": {"body": "SimSun", "head": "SimHei"},
+        "size": 12,
+        "lineHeight": 20,
+        "title": {"size": 16},
+        "heading": {"size": 12},
+        "scoreFormat": ("第 {n} 题　{title}（{score} 分）" if o.scores else "第 {n} 题　{title}"),
+        "header": {"text": ""},
+        "footer": {"format": _footer(o)},
+    }
+    if not o.scores:
+        tpl["score"] = {"show": False}
     return {
-        "title": (o.title or "").strip() or "化学竞赛练习卷",
+        "title": (o.title or "").strip(),
         "subtitle": head,
         "total_score": round(sum(float(it.get("score") or 0) for it in items), 1),
-        "template": {
-            "header": {"text": ""},
-            "footer": {"format": _footer(o)},
-        },
+        "template": tpl,
         "items": items,
         "status": "done",
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -236,7 +246,7 @@ def _docx(doc: dict, o: ComposeIn) -> bytes:
 
     eo = _opts(o)
     try:
-        fs = float(eo.get("font_size") or 10.5)
+        fs = float(eo.get("font_size") or 12)
     except (TypeError, ValueError):
         fs = 10.5
     try:
@@ -298,13 +308,15 @@ def _docx(doc: dict, o: ComposeIn) -> bytes:
             ea(r)
         return p
 
-    tp = para(doc["title"], size=17, bold=True, after=2, align=WD_ALIGN_PARAGRAPH.CENTER)
-    tp.runs[0].font.name = "微软雅黑"
-    ea(tp.runs[0], "微软雅黑")
-    bits = [str(doc.get("subtitle") or "").strip(),
-            f"共 {len(doc['items'])} 题　满分 {doc['total_score']} 分" if doc.get("total_score") else
-            f"共 {len(doc['items'])} 题"]
-    para("　　".join([b for b in bits if b]), size=9, after=10, align=WD_ALIGN_PARAGRAPH.CENTER)
+    ttl = str(doc.get("title") or "").strip()
+    if ttl:
+        tp = para(ttl, size=16, bold=True, after=2, align=WD_ALIGN_PARAGRAPH.CENTER)
+        tp.runs[0].font.name = "宋体"
+        ea(tp.runs[0], "宋体")
+    bits = [str(doc.get("subtitle") or "").strip()]
+    sub = "　　".join([b for b in bits if b])
+    if sub:
+        para(sub, size=10.5, after=10, align=WD_ALIGN_PARAGRAPH.CENTER)
 
     def add_img(path_w: dict, maxw=body_w):
         url = str(path_w.get("path") or "")
