@@ -7,18 +7,22 @@ const refs = reactive({ items: [], median: null, count: 0 })
 const mine = reactive({ title: '我的卷子', questions: 0, subs: 0, score: 0, pages: 0 })
 const out = reactive({ rows: [], advice: [] })
 const busy = ref(false)
+const refBusy = ref(false)
 const err = ref('')
 const papers = ref([])
 
-async function loadRefs() {
+async function loadRefs(force = false) {
   err.value = ''
+  refBusy.value = true
   try {
-    const r = await api.get('/api/bench/refs?kind=' + encodeURIComponent(kind.value))
+    const r = await api.get('/api/bench/refs?kind=' + encodeURIComponent(kind.value) + (force ? '&force=1' : ''))
     refs.items = r.items || []
     refs.median = r.median
     refs.count = r.count || 0
   } catch (e) {
     err.value = api.errText(e)
+  } finally {
+    refBusy.value = false
   }
 }
 
@@ -69,7 +73,9 @@ onMounted(() => { loadRefs(); loadPapers() })
         <span class="lbl">参考卷库</span>
         <button class="sm" :class="{ on: kind === '初赛' }" @click="kind = '初赛'; loadRefs()">初赛</button>
         <button class="sm" :class="{ on: kind === '决赛' }" @click="kind = '决赛'; loadRefs()">决赛</button>
-        <span class="mut" v-if="refs.median">
+        <button class="sm" :disabled="refBusy" @click="loadRefs(true)">重新扫一遍</button>
+        <span class="mut" v-if="refBusy">正在扫真题（第一次约 1–2 分钟，扫完会记下来，下次打开就有了）…</span>
+        <span class="mut" v-else-if="refs.median">
           扫到 {{ refs.count }} 份：中位数 {{ refs.median.questions }} 题 / {{ refs.median.subs }} 问 /
           {{ refs.median.pages }} 页
         </span>

@@ -5,7 +5,9 @@
 """
 from __future__ import annotations
 
+import json
 import re
+import time
 from pathlib import Path
 from statistics import median
 
@@ -20,6 +22,8 @@ ROOTS = {
     "决赛": Path(r"D:\决赛"),
 }
 _CACHE: dict[str, list[dict]] = {}
+_CACHE_DIR = Path(__file__).resolve().parents[3] / "data"
+_MAX_FILES = 60          # 每个库最多扫 60 份，够看中位数了，扫全部太慢
 
 
 def _stats(pdf: Path) -> dict:
@@ -43,22 +47,33 @@ def _stats(pdf: Path) -> dict:
     return {"pages": pages, "questions": q, "subs": subs}
 
 
-def _scan(kind: str) -> list[dict]:
-    if kind in _CACHE:
+def _cache_file(kind: str) -> Path:
+    return _CACHE_DIR / f"bench-{kind}.json"
+
+
+def _scan(kind: str, force: bool = False) -> list[dict]:
+    if kind in _CACHE and not force:
         return _CACHE[kind]
     root = ROOTS.get(kind)
     if not root or not root.is_dir():
         raise HTTPException(404, f"没找到参考卷目录：{root}")
+    cf = _cache_file(kind)
+    if not force and cf.is_file():
+        try:
+            data = json.loads(cf.read_text(encoding="utf-8"))
+            if data.get("items"):
+                _CACHE[kind] = data["items"]
+                return _CACHE[kind]
+        except Exception:
+            pass
     out: list[dict] = []
-    for p in sorted(root.rglob("*.pdf")):
-        name = p.name
-        if "答案" in name:          # 只统计试题卷
-            continue
+    files = [p for p in sorted(root.rglob("*.pdf")) if "答案" not in p.name]
+    for p in files[:_MAX_FILES]:
         st = _stats(p)
         if st["questions"] <= 0:
             continue
         out.append({
-            "name": name,
+            "name": p.name,
             "path": str(p),
             "dir": p.parent.name,
             "pages": st["pages"],
@@ -67,12 +82,18 @@ def _scan(kind: str) -> list[dict]:
             "per_q": round(st["pages"] / max(1, st["questions"]), 2),
         })
     _CACHE[kind] = out
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cf.write_text(json.dumps({"at": time.strftime("%Y-%m-%d %H:%M"), "items": out},
+                                 ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
     return out
 
 
 @router.get("/refs")
-def refs(kind: str = "初赛") -> dict:
-    items = _scan(kind)
+def refs(kind: str = "初赛", force: bool = False) -> dict:
+    items = _scan(kind, force=force)
     if not items:
         raise HTTPException(404, f"{kind} 里没扫到可用的试题 PDF")
     return {
