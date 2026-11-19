@@ -234,7 +234,8 @@ async function onCanvasFiles({ files }) {
 .rpane :deep(.cvhead) { flex-wrap: wrap; row-gap: 4px; }
 .rpane :deep(.cvhead .lab) { white-space: nowrap; }
 .rpane :deep(.wtools) { flex-wrap: wrap; row-gap: 4px; }
-.dbody { display: grid; grid-template-columns: 300px minmax(0, 1fr) 470px; gap: 8px; flex: 1; min-height: 0; }
+.dbody { display: grid; grid-template-columns: 260px minmax(0, 1fr) clamp(320px, 26%, 420px); gap: 8px; flex: 1; min-height: 0; }
+@media (max-width: 1500px) { .dbody { grid-template-columns: 240px minmax(0, 1fr) clamp(300px, 24%, 400px); } }
 .desk.lf .dbody { grid-template-columns: 0 minmax(0, 1fr) 470px; }
 .desk.rf .dbody { grid-template-columns: 300px minmax(0, 1fr) 0; }
 .desk.lf.rf .dbody { grid-template-columns: 0 minmax(0, 1fr) 0; }
