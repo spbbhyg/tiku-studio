@@ -193,16 +193,14 @@ def _render_formula(tex: str, display: bool, base_url: str) -> tuple[bytes, floa
 
     payload = base64.urlsafe_b64encode(tex.encode("utf-8")).decode("ascii")
     url = f"{base_url.rstrip('/')}/api/doce/formula-page?b64={payload}&d={1 if display else 0}"
+    from ..services import browser as brmod
+
+    brmod.ensure_path()
     with sync_playwright() as p:
-        browser = None
-        for kwargs in ({}, {"channel": "msedge"}, {"channel": "chrome"}):
-            try:
-                browser = p.chromium.launch(**kwargs)
-                break
-            except Exception:
-                continue
-        if browser is None:
-            raise HTTPException(500, "没有可用的浏览器内核，公式渲不出来")
+        try:
+            browser = brmod.launch(p)
+        except brmod.BrowserMissing as exc:
+            raise HTTPException(500, exc.user_message()) from exc
         try:
             page = browser.new_page(device_scale_factor=3, viewport={"width": 1400, "height": 600})
             page.goto(url, wait_until="load", timeout=30000)

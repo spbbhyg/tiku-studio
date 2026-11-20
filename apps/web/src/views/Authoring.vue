@@ -9,8 +9,6 @@ import CanvasPane from '../components/CanvasPane.vue'
 import FormulaPad from '../components/FormulaPad.vue'
 import { extractFromFrame } from '../ketcherSvg.js'
 import Icon from '../components/Icon.vue'
-import TextMode from '../components/TextMode.vue'
-import ExamHome from './ExamHome.vue'
 import DocDesk from '../components/DocDesk.vue'
 
 const drawer = ref('')            // '' | 'formula' | 'struct' | 'pdf' | 'subs'
@@ -201,15 +199,15 @@ function copySvg() {
 const route = useRoute()
 const router = useRouter()
 
-// 出题双模式：canvas = 老画布（一行行为都不改），text = 单题结构化录入
+// 出题两个模式：doc = 文档（默认，Word 排版），canvas = 自由画布
 const _m0 = String(route.query.mode || '')
 const _savedMode = String(localStorage.getItem('tiku-author-mode') || '')
-const editMode = ref(['text', 'paper', 'doc'].includes(_m0)
-  ? _m0
-  : (['text', 'paper', 'doc'].includes(_savedMode) ? _savedMode : 'canvas'))
+const editMode = ref(_m0 === 'canvas'
+  ? 'canvas'
+  : (_savedMode === 'canvas' ? 'canvas' : 'doc'))
 const canvasDirty = ref(false)
 const textRef = ref(null)
-const textOnly = ref(false)        // 库里这道题是单题模式录的
+const textOnly = ref(false)        // 库里这道题是单题模式录的（旧数据兼容）
 const textSeed = ref(null)
 function onTextSaved(r) {
   editingQuestionId.value = r.id
@@ -220,13 +218,13 @@ function onTextSaved(r) {
 
 function switchMode(m) {
   if (m === editMode.value) return
-  const dirty = editMode.value === 'canvas' ? canvasDirty.value : !!(textRef.value && textRef.value.isDirty())
-  if (dirty && !confirm('切换模式会丢掉当前模式里没保存的改动，确定切换？')) return
+  const dirty = editMode.value === 'canvas' ? canvasDirty.value : false
+  if (dirty && !confirm('切换模式会丢掉画布上没保存的改动，确定切换？')) return
   editMode.value = m
   canvasDirty.value = false
   localStorage.setItem('tiku-author-mode', m)
   const q = { ...route.query }
-  if (m === 'canvas') delete q.mode; else q.mode = m
+  if (m === 'canvas') q.mode = 'canvas'; else delete q.mode
   router.replace({ path: route.path, query: q })
 }
 const phoneHint = ref(typeof window !== 'undefined' && window.innerWidth < 820)
@@ -1573,27 +1571,20 @@ onBeforeUnmount(() => {
       <span v-if="draftAt" class="draftat" title="出题过程自动留草稿，关掉页面也不会丢">草稿已存 {{ draftAt.slice(11) }}</span>
       <span class="wsp" />
       <div class="modesw">
-        <button :class="{ on: editMode === 'canvas' }" @click="switchMode('canvas')">画布</button>
-        <button :class="{ on: editMode === 'text' }" @click="switchMode('text')">单题</button>
-        <button :class="{ on: editMode === 'paper' }" title="整卷：新建整卷，录大题小问，导出题目卷+答案卷"
-                @click="switchMode('paper')">整卷</button>
-        <button :class="{ on: editMode === 'doc' }" title="文档：直接用 Word 编辑（表格、修订、页眉页脚都保留）"
+        <button :class="{ on: editMode === 'doc' }" title="文档：直接用 Word 排版（表格、修订、页眉页脚都保留）"
                 @click="switchMode('doc')">文档</button>
+        <button :class="{ on: editMode === 'canvas' }" title="画布：自由拖图、裁剪、结构式" @click="switchMode('canvas')">画布</button>
       </div>
       <span class="whint">{{ editMode === 'doc'
-        ? '文档模式：打开一份 Word 直接编辑，改完「保存到项目」'
-        : (editMode === 'paper'
-          ? '整卷模式：新建整卷→录大题小问→导出题目卷+答案卷（要按题库勾题请去「组卷」）'
-          : (editMode === 'text'
-            ? '单题模式：纯文本 + 行内图，右下角实时预览 A4'
-            : (drawer ? '右侧面板打开时，画布会自动缩窄' : '点上方按钮在右侧打开工具面板'))) }}</span>
+        ? '文档模式：像 Word 一样排版，改完自动保存'
+        : (drawer ? '右侧面板打开时，画布会自动缩窄' : '点上方按钮在右侧打开工具面板') }}</span>
     </div>
 
     <div class="wbody" v-show="editMode === 'canvas'">
       <div v-if="textOnly" class="textonly">
-        <b>这是「单题模式」录的题</b>
-        <p>结构化题面在单题模式里编辑；两种模式互不转换，画布这边不会动它。</p>
-        <button class="primary" @click="switchMode('text')">切到单题模式打开</button>
+        <b>这是老版本「单题模式」录的题</b>
+        <p>新版只保留「文档」和「画布」两个模式；要改这道题请用文档模式（Word 排版）。</p>
+        <button class="primary" @click="switchMode('doc')">切到文档模式</button>
       </div>
 
 
@@ -1883,16 +1874,6 @@ onBeforeUnmount(() => {
                     @files="onCanvasFiles($event, 'a')" />
       </div>
     </section>
-    </div>
-
-    <div class="wbody tmode" v-show="editMode === 'text'">
-      <TextMode ref="textRef" :question-id="Number(route.query.id || 0)"
-                :meta="{ books: meta.books, topics: meta.topics, qtypes: meta.qtypes }"
-                :seed="textSeed" @saved="onTextSaved" />
-    </div>
-
-    <div class="wbody pmode" v-show="editMode === 'paper'">
-      <div class="pmwrap"><ExamHome /></div>
     </div>
 
     <div class="wbody dmode" v-show="editMode === 'doc'">

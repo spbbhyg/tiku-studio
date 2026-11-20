@@ -615,6 +615,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
       三步：<b>检查更新</b> → <b>下载更新</b> → <b>应用并重启</b>。全程不用登录 GitHub，数据在 <code>data/</code> 里不会被覆盖。
     </p>
     <p class="muted" style="margin:4px 0 10px; font-size:12.5px">
+      下载默认走<b>清华镜像</b>（mirrors.tuna.tsinghua.edu.cn），慢或失败会自动换 ghfast 加速和 GitHub 直连；
+      下载支持断点续传，中途断了再点一次会接着下（已下好的部分不会重下）。
+    </p>
+    <p class="muted" style="margin:4px 0 10px; font-size:12.5px">
       小提示：GitHub 对未登录查询有「每小时 60 次」的限制，超了会提示<b>限流</b>（等一小时或换手机热点就好）。
       所以这里查到的结果会缓存 10 分钟，反复点不会重复消耗额度；确实要立刻重查再点「强制刷新」。
     </p>

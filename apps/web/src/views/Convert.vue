@@ -5,7 +5,21 @@ import { computed, onMounted, ref } from 'vue'
 import { api } from '../api.js'
 
 const engines = ref({})
-const tab = ref('doc')          // doc | split | merge | ocr
+const tab = ref('doc')          // doc | split | merge | ocr | dmerge | dsplit
+
+// Word 合并
+const wmFiles = ref([])          // {id, file, name, size}
+const wmBusy = ref(false)
+const wmBlob = ref(null)
+const wmMsg = ref('')
+// Word 拆分
+const wsFile = ref(null)
+const wsMode = ref('question')   // question | count
+const wsCount = ref(2)
+const wsBusy = ref(false)
+const wsBlob = ref(null)
+const wsMsg = ref('')
+const wsName = ref('')
 const dragOver = ref('')
 
 // ---------- 文档互转队列 ----------
@@ -206,6 +220,75 @@ async function doMerge() {
   } finally { mergeBusy.value = false }
 }
 
+// ---------------- Word 合并 ----------------
+function takeWordMerge(files) {
+  const ok = files.filter((f) => /\.docx?$/i.test(f.name))
+  const bad = files.length - ok.length
+  ok.forEach((f) => wmFiles.value.push({ id: seq++, file: f, name: f.name, size: f.size }))
+  wmMsg.value = bad ? `${bad} 个不是 Word，已跳过（.doc 请先另存为 .docx）` : ''
+  wmBlob.value = null
+}
+function moveWordMerge(i, d) {
+  const j = i + d
+  if (j < 0 || j >= wmFiles.value.length) return
+  const [x] = wmFiles.value.splice(i, 1)
+  wmFiles.value.splice(j, 0, x)
+}
+async function doWordMerge() {
+  if (wmFiles.value.length < 2) { wmMsg.value = '至少要两份 Word 才能合并'; return }
+  wmBusy.value = true
+  wmMsg.value = ''
+  wmBlob.value = null
+  try {
+    const fd = new FormData()
+    wmFiles.value.forEach((m) => fd.append('files', m.file))
+    const resp = await fetch('/api/convert/docx-merge', { method: 'POST', body: fd })
+    if (!resp.ok) {
+      let d = await resp.text()
+      try { d = JSON.parse(d).detail || d } catch { /* 原样 */ }
+      throw new Error(d)
+    }
+    wmBlob.value = await resp.blob()
+    wmMsg.value = `合并好了：${wmFiles.value.length} 份 → 1 个 Word（${kb(wmBlob.value.size)}），每份之间自动分页`
+  } catch (e) {
+    wmMsg.value = '合并失败：' + errText(e)
+  } finally { wmBusy.value = false }
+}
+
+// ---------------- Word 拆分 ----------------
+function takeWordSplit(files) {
+  const f = files[0]
+  if (!f) return
+  if (!/\.docx?$/i.test(f.name)) { wsMsg.value = '这里只收 .docx'; return }
+  wsFile.value = f
+  wsMsg.value = ''
+  wsBlob.value = null
+}
+async function doWordSplit() {
+  if (!wsFile.value) return
+  wsBusy.value = true
+  wsMsg.value = ''
+  wsBlob.value = null
+  try {
+    const fd = new FormData()
+    fd.append('file', wsFile.value)
+    fd.append('mode', wsMode.value)
+    fd.append('n', String(wsCount.value || 2))
+    const resp = await fetch('/api/convert/docx-split', { method: 'POST', body: fd })
+    if (!resp.ok) {
+      let d = await resp.text()
+      try { d = JSON.parse(d).detail || d } catch { /* 原样 */ }
+      throw new Error(d)
+    }
+    wsBlob.value = await resp.blob()
+    const n = resp.headers.get('x-parts') || ''
+    wsName.value = wsFile.value.name.replace(/\.docx?$/i, '') + '-拆分.zip'
+    wsMsg.value = `拆好了：${n} 份 Word，打包成一个 zip（${kb(wsBlob.value.size)}）`
+  } catch (e) {
+    wsMsg.value = '拆分失败：' + errText(e)
+  } finally { wsBusy.value = false }
+}
+
 // ---------------- 扫描件 OCR ----------------
 function takeOcr(files) {
   const f = files[0]
@@ -257,6 +340,8 @@ const engineLine = computed(() => {
     <button class="tab" :class="{ on: tab === 'doc' }" @click="tab = 'doc'">文档互转</button>
     <button class="tab" :class="{ on: tab === 'split' }" @click="tab = 'split'">PDF 拆分</button>
     <button class="tab" :class="{ on: tab === 'merge' }" @click="tab = 'merge'">PDF 合并</button>
+    <button class="tab" :class="{ on: tab === 'dmerge' }" @click="tab = 'dmerge'">Word 合并</button>
+    <button class="tab" :class="{ on: tab === 'dsplit' }" @click="tab = 'dsplit'">Word 拆分</button>
     <button class="tab" :class="{ on: tab === 'ocr' }" @click="tab = 'ocr'">扫描件转 Word</button>
   </div>
 
@@ -322,6 +407,57 @@ const engineLine = computed(() => {
       <button v-if="mergeFiles.length" class="ghost" @click="mergeFiles = []; mergeBlob = null">清空</button>
     </div>
     <p v-if="mergeMsg" class="msg">{{ mergeMsg }}</p>
+  </div>
+
+  <!-- Word 合并 -->
+  <div v-show="tab === 'dmerge'" class="card">
+    <h3>Word 合并</h3>
+    <p class="tip">把各自出的题（.docx）按列表顺序并成一份，每份之间自动分页；文字、表格、图片都保留。</p>
+    <div class="dz" @dragover.prevent="dragOver = 'dmerge'" @dragleave="dragOver = ''"
+         @drop.prevent="dragOver = ''; takeWordMerge(Array.from($event.dataTransfer?.files || []))"
+         @click="pickFile('.docx', true, takeWordMerge)">
+      <b>{{ wmFiles.length ? `已加 ${wmFiles.length} 份` : '点这里选 Word（可多选），或把 .docx 拖进来' }}</b>
+    </div>
+    <div v-if="wmFiles.length" class="mlist">
+      <div v-for="(m, i) in wmFiles" :key="m.id" class="mrow">
+        <span class="idx">{{ i + 1 }}</span>
+        <span class="nm">{{ m.name }}</span>
+        <span class="mut">{{ kb(m.size) }}</span>
+        <button class="mini" :disabled="i === 0" @click="moveWordMerge(i, -1)">↑</button>
+        <button class="mini" :disabled="i === wmFiles.length - 1" @click="moveWordMerge(i, 1)">↓</button>
+        <button class="mini" @click="wmFiles.splice(i, 1)">×</button>
+      </div>
+    </div>
+    <div class="row">
+      <button class="primary" :disabled="wmFiles.length < 2 || wmBusy" @click="doWordMerge">{{ wmBusy ? '合并中…' : '开始合并' }}</button>
+      <button v-if="wmBlob" class="ghost" @click="saveBlob(wmBlob, '合并稿.docx')">下载 Word</button>
+      <button v-if="wmFiles.length" class="ghost" @click="wmFiles = []; wmBlob = null">清空</button>
+    </div>
+    <p v-if="wmMsg" class="msg">{{ wmMsg }}</p>
+  </div>
+
+  <!-- Word 拆分 -->
+  <div v-show="tab === 'dsplit'" class="card">
+    <h3>Word 拆分</h3>
+    <p class="tip">一份 Word 里有好几道题，想拆成每人一份：按题号切（识别「第 1 题 / 1. / （1）」这类开头），或者平均切成 N 份。输出是一个 zip。</p>
+    <div class="dz" @dragover.prevent="dragOver = 'dsplit'" @dragleave="dragOver = ''"
+         @drop.prevent="dragOver = ''; takeWordSplit(Array.from($event.dataTransfer?.files || []))"
+         @click="pickFile('.docx', false, takeWordSplit)">
+      <b>{{ wsFile ? wsFile.name : '点这里选 Word，或把 .docx 拖进来' }}</b>
+      <span v-if="wsFile" class="mut">{{ kb(wsFile.size) }}</span>
+    </div>
+    <div class="row">
+      <label class="f"><span>怎么拆</span>
+        <select v-model="wsMode">
+          <option value="question">按题号切（推荐）</option>
+          <option value="count">平均切成 N 份</option>
+        </select></label>
+      <label v-if="wsMode === 'count'" class="f"><span>份数</span>
+        <input v-model.number="wsCount" type="number" min="2" max="30" /></label>
+      <button class="primary" :disabled="!wsFile || wsBusy" @click="doWordSplit">{{ wsBusy ? '拆分中…' : '开始拆分' }}</button>
+      <button v-if="wsBlob" class="ghost" @click="saveBlob(wsBlob, wsName)">下载 zip</button>
+    </div>
+    <p v-if="wsMsg" class="msg">{{ wsMsg }}</p>
   </div>
 
   <!-- 扫描件 OCR -->

@@ -183,6 +183,37 @@ const EN2CN = {
   'Viewing': '只读', 'Loading document': '正在打开文档', 'Opening document...': '正在解析文档内容…',
   PROGRESS: '进度', unset: '', 'SuperDoc body (v2)': '文档正文', 'Text composition input': '输入'
 };
+// 单词级兜底：整条文案按词翻译，能翻全就翻，翻不全就保持原样（宁可留英文也不出半中半英）
+const CN_WORDS = {
+  insert: '插入', remove: '移除', delete: '删除', table: '表格', paragraph: '段落',
+  style: '样式', styles: '样式', numbering: '编号', bullets: '项目符号', clear: '清除',
+  format: '格式', show: '显示', hide: '隐藏', apply: '应用', cancel: '取消', done: '完成',
+  close: '关闭', more: '更多', options: '选项', level: '级别', page: '页面', break: '分页',
+  symbol: '符号', row: '行', column: '列', cell: '单元格', cells: '单元格', border: '边框',
+  borders: '边框', align: '对齐', left: '左', right: '右', center: '居中', indent: '缩进',
+  list: '列表', text: '文字', color: '颜色', highlight: '底纹', link: '链接', image: '图片',
+  above: '上方', below: '下方', merge: '合并', split: '拆分', fix: '修复', tables: '表格',
+  ruler: '标尺', marks: '标记', editing: '编辑', tracking: '修订', accept: '接受', reject: '拒绝',
+  change: '修订', changes: '修订', zoom: '缩放', font: '字体', size: '字号', copy: '复制',
+  formatting: '格式', painter: '格式刷', search: '查找', replace: '替换', undo: '撤销', redo: '重做',
+  pageBreak: '分页符',
+}
+function cnWords(t) {
+  const k = String(t || '').trim()
+  if (!k || /[一-鿿]/.test(k)) return null
+  const parts = k.split(/\s+/)
+  const out = []
+  for (const w of parts) {
+    const key = w.toLowerCase().replace(/[^a-z]/g, '')
+    if (!key) { out.push(w); continue }
+    const cn = CN_WORDS[key]
+    if (!cn) return null
+    out.push(cn)
+  }
+  const joined = out.join('')
+  return joined === k ? null : joined
+}
+
 function cnText(t) {
   const k = String(t || '').trim()
   if (!k) return null
@@ -191,8 +222,9 @@ function cnText(t) {
   if (m) {
     if (Object.prototype.hasOwnProperty.call(EN2CN, m[1])) return EN2CN[m[1]]
     if (/[一-鿿]/.test(m[1])) return m[1]
+    return cnWords(m[1])
   }
-  return null
+  return cnWords(k)
 }
 function translateOnce(root) {
   if (!root) return

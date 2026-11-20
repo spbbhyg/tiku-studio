@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { api } from '../api.js'
 import { renderMath } from '../math.js'
 import { flowText } from '../textflow.js'
@@ -9,8 +9,10 @@ const props = defineProps({
   hint: { type: String, default: '把左侧裁好的图拖进来，或点「＋ 文本」开始排版' },
   maxPages: { type: Number, default: 1 },
   metaable: { type: Boolean, default: false },   // 是否带页眉页脚（只有题目画布需要）
+  toDoc: { type: Boolean, default: false },      // 三栏工作台里：多一个「→ 文档」按钮
+  canPaste: { type: Boolean, default: true },    // 是否接收 Ctrl+V 截图
 })
-const emit = defineEmits(['activate', 'changed', 'files'])
+const emit = defineEmits(['activate', 'changed', 'files', 'toDoc'])
 
 const PW = 595
 const PH = 842
@@ -1145,13 +1147,17 @@ function fitScale() {
 }
 let ro = null
 onMounted(() => {
+  window.addEventListener('paste', onWinPaste)
   fitScale()
   ro = new ResizeObserver(() => { if (!dragging) fitScale() })
   if (canvasEl.value?.parentElement) ro.observe(canvasEl.value.parentElement)
 })
 /* 内容（位置/文字/缩放）一变就重测底部：页面高度实时跟上真实内容 */
 watch([blocks, scale, trimBlank], () => nextTick(measureBottom), { deep: true })
-onBeforeUnmount(() => { if (ro) ro.disconnect() })
+onBeforeUnmount(() => {
+  window.removeEventListener('paste', onWinPaste)
+  if (ro) ro.disconnect()
+})
 
 // ---------- 拖放（来自左栏裁剪 / 从桌面拖入图片或 PDF） ----------
 function dropOnCanvas(e) {
@@ -1169,7 +1175,230 @@ function dropOnCanvas(e) {
   const p = e.dataTransfer.getData('text/plain')
   if (!p) return
   const host = e.currentTarget.getBoundingClientRect()
-  addImage(p, (e.clientX - host.left) / scale.value, (e.clientY - host.top) / scale.value)
+  const dx = (e.clientX - host.left) / scale.value
+  const dy = (e.clientY - host.top) / scale.value
+  if (p.startsWith('data:image/')) { addDataUrl(p, dx, dy); return }   // 从文档拖过来的图
+  if (p.startsWith('http://') || p.startsWith('https://')) {
+    ;(async () => {
+      try {
+        const blob = await (await fetch(p)).blob()
+        const data = await new Promise((res) => {
+          const fr = new FileReader()
+          fr.onload = () => res(String(fr.result || ''))
+          fr.onerror = () => res('')
+          fr.readAsDataURL(blob)
+        })
+        if (data) addDataUrl(data, dx, dy)
+      } catch (err) { tip('这张图取不下来：' + api.errText(err)) }
+    })()
+    return
+  }
+  addImage(p, dx, dy)
+}
+
+const hasImageSel = computed(() => {
+  const b = blocks.value.find((x) => x.id === selectedId.value)
+  return !!(b && b.type === 'image')
+})
+function emitToDoc() {
+  const b = blocks.value.find((x) => x.id === selectedId.value)
+  if (!b || b.type !== 'image' || !b.path) { tip('先点一下要送过去的那张图'); return }
+  emit('toDoc', { path: b.path, w: b.w || 300, h: b.h || 0 })
+  tip('已送进中间的 Word')
+}
+
+// ---------- 粘贴截图 / 从文档拖进来的图 ----------
+async function uploadDataUrl(dataUrl, name) {
+  const blob = await (await fetch(dataUrl)).blob()
+  const ext = (String(blob.type || '').split('/')[1] || 'png').replace('jpeg', 'jpg')
+  const fd = new FormData()
+  fd.append('file', new File([blob], `${name || 'paste'}-${Date.now()}.${ext}`, { type: blob.type || 'image/png' }))
+  const r = await api.postForm('/api/v2/materials/upload', fd)
+  return (r && (r.path || r.file)) || ''
+}
+
+/** 把一张 dataURL 图落进画布（拖拽、粘贴都走这里） */
+async function addDataUrl(dataUrl, x, y) {
+  try {
+    const path = await uploadDataUrl(dataUrl)
+    if (!path) { tip('这张图没能存下来（可能是格式不支持）'); return }
+    addImage(path, x, y)
+  } catch (e) {
+    tip('图片插入失败：' + api.errText(e))
+  }
+}
+
+function pickCenter() {
+  return { x: Math.round((PW - 320) / 2), y: Math.round(120 + Math.random() * 60) }
+}
+
+/** 窗口级粘贴：Ctrl+V 直接贴系统截图到画布（输入框里粘贴不拦） */
+function onWinPaste(e) {
+  if (!props.canPaste) return
+  const el = document.activeElement
+  const tag = el && el.tagName ? el.tagName.toUpperCase() : ''
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || (el && el.isContentEditable)) return
+  const items = (e.clipboardData && e.clipboardData.items) || []
+  const pics = []
+  for (const it of items) {
+    if (it.kind === 'file' && String(it.type).startsWith('image/')) {
+      const f = it.getAsFile()
+      if (f) pics.push(f)
+    }
+  }
+  if (!pics.length) return
+  e.preventDefault()
+  ;(async () => {
+    for (const f of pics) {
+      const data = await new Promise((res) => {
+        const fr = new FileReader()
+        fr.onload = () => res(String(fr.result || ''))
+        fr.onerror = () => res('')
+        fr.readAsDataURL(f)
+      })
+      if (!data) continue
+      const { x, y } = pickCenter()
+      await addDataUrl(data, x, y)
+    }
+    tip(`已把 ${pics.length} 张截图贴进画布`)
+  })()
+}
+
+// ---------- 裁剪模式（橡皮擦式独立界面） ----------
+const cropOn = ref(false)
+const cropImg = ref(null)        // 正在裁的那个 image block
+const cropBox = ref({ x: 0, y: 0, w: 0, h: 0 })   // 相对图片的像素框
+const cropDrag = ref(null)
+
+function enterCrop() {
+  const b = blocks.value.find((x) => x.id === selectedId.value)
+  if (!b || b.type !== 'image') { tip('先点一下要裁的那张图，再点「裁剪」'); return }
+  cropImg.value = b
+  cropBox.value = { x: 0, y: 0, w: 0, h: 0 }
+  cropOn.value = true
+  emit('activate')
+}
+function cancelCrop() {
+  cropOn.value = false
+  cropImg.value = null
+  cropDrag.value = null
+}
+function cropDown(e) {
+  const host = e.currentTarget.getBoundingClientRect()
+  cropDrag.value = {
+    x0: (e.clientX - host.left) / cropScale.value,
+    y0: (e.clientY - host.top) / cropScale.value,
+  }
+  cropBox.value = { x: cropDrag.value.x0, y: cropDrag.value.y0, w: 0, h: 0 }
+  window.addEventListener('pointermove', cropMove)
+  window.addEventListener('pointerup', cropUp)
+}
+function cropMove(e) {
+  const d = cropDrag.value
+  if (!d || !cropImg.value) return
+  const host = document.querySelector('.crop-stage')
+  if (!host) return
+  const rc = host.getBoundingClientRect()
+  const dx = (e.clientX - rc.left) / cropScale.value
+  const dy = (e.clientY - rc.top) / cropScale.value
+  cropBox.value = {
+    x: Math.min(d.x0, dx), y: Math.min(d.y0, dy),
+    w: Math.abs(dx - d.x0), h: Math.abs(dy - d.y0),
+  }
+}
+function cropUp() {
+  window.removeEventListener('pointermove', cropMove)
+  window.removeEventListener('pointerup', cropUp)
+  cropDrag.value = null
+}
+const cropScale = computed(() => {
+  const b = cropImg.value
+  if (!b || !b.w || !b.h) return 1
+  return Math.min(1, 520 / b.w)
+})
+const cropStyle = computed(() => {
+  const b = cropBox.value
+  return { left: b.x * cropScale.value + 'px', top: b.y * cropScale.value + 'px',
+           width: b.w * cropScale.value + 'px', height: b.h * cropScale.value + 'px' }
+})
+
+async function loadBitmap(block, transform) {
+  const url = imgUrl(block.path)
+  const img = new Image()
+  img.crossOrigin = 'anonymous'
+  await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url })
+  let src = img
+  if (transform === 'rot' || transform === 'flip') {
+    const cv = document.createElement('canvas')
+    cv.width = img.naturalWidth
+    cv.height = img.naturalHeight
+    const ctx = cv.getContext('2d')
+    if (transform === 'rot') {
+      cv.width = img.naturalHeight
+      cv.height = img.naturalWidth
+      ctx.translate(cv.width / 2, cv.height / 2)
+      ctx.rotate(Math.PI / 2)
+      ctx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2)
+    } else {
+      ctx.translate(cv.width, 0)
+      ctx.scale(-1, 1)
+      ctx.drawImage(img, 0, 0)
+    }
+    src = cv
+  }
+  return src
+}
+
+/** 旋转 / 翻转：整张图重画，保持画布上的宽高比 */
+async function cropTransform(kind) {
+  const b = cropImg.value
+  if (!b) return
+  try {
+    const src = await loadBitmap(b, kind)
+    const cv = document.createElement('canvas')
+    cv.width = src.width
+    cv.height = src.height
+    cv.getContext('2d').drawImage(src, 0, 0)
+    const dataUrl = cv.toDataURL('image/png')
+    const path = await uploadDataUrl(dataUrl, 'rotate')
+    if (!path) throw new Error('存图失败')
+    b.path = path
+    if (kind === 'rot') { const t = b.w; b.w = b.h || t; b.h = t }
+    b.cacheKey = Date.now()
+    emit('changed')
+    cropImg.value = b
+    tip(kind === 'rot' ? '已旋转 90°' : '已水平翻转')
+  } catch (e) {
+    tip('处理失败：' + api.errText(e))
+  }
+}
+
+async function applyCrop() {
+  const b = cropImg.value
+  const box = cropBox.value
+  if (!b) return
+  if (box.w < 6 || box.h < 6) { tip('先在图上拖出一个框，再点「确定」'); return }
+  try {
+    const img = await loadBitmap(b, '')
+    const sx = img.naturalWidth / Math.max(1, b.w)
+    const sy = img.naturalHeight / Math.max(1, b.h)
+    const cv = document.createElement('canvas')
+    cv.width = Math.max(1, Math.round(box.w * sx))
+    cv.height = Math.max(1, Math.round(box.h * sy))
+    cv.getContext('2d').drawImage(img, box.x * sx, box.y * sy, cv.width, cv.height, 0, 0, cv.width, cv.height)
+    const dataUrl = cv.toDataURL('image/png')
+    const path = await uploadDataUrl(dataUrl, 'crop')
+    if (!path) throw new Error('存图失败')
+    b.path = path
+    b.w = Math.round(box.w)
+    b.h = Math.round(box.h)
+    b.cacheKey = Date.now()
+    emit('changed')
+    cancelCrop()
+    tip('裁剪好了')
+  } catch (e) {
+    tip('裁剪失败：' + api.errText(e))
+  }
 }
 
 // ---------- 对外接口 ----------
@@ -1221,7 +1450,7 @@ function addBlocks(list, opts = {}) {
   return n
 }
 
-defineExpose({ getLayout, setLayout, addImage, addBlocks, clear, rotateSel, copySel, pasteClip, groupSel, ungroupSel, stitchSel, removeSelected, clearSel, nudge, addText, addTextFlow, reflowSelected, unifyFonts, selectAll, bumpSize, imageToText })
+defineExpose({ getLayout, setLayout, addImage, addDataUrl, enterCrop, cropOn, addBlocks, clear, rotateSel, copySel, pasteClip, groupSel, ungroupSel, stitchSel, removeSelected, clearSel, nudge, addText, addTextFlow, reflowSelected, unifyFonts, selectAll, bumpSize, imageToText })
 
 import Icon from './Icon.vue'
 </script>
@@ -1281,6 +1510,12 @@ import Icon from './Icon.vue'
         <button class="ghost" :disabled="!selected" title="旋转 90°" @click="rotateSel"><Icon name="rotate" /></button>
         <button class="ghost" :disabled="!selIds.length" title="复制" @click="copySel"><Icon name="copy" /></button>
         <button class="ghost" :disabled="!clip.length" title="粘贴" @click="pasteClip"><Icon name="paste" /></button>
+        <button class="ghost" :disabled="!hasImageSel" title="裁剪：在图上拖框，确定后只保留框内（可旋转、翻转）" @click="enterCrop">
+          <Icon name="crop" /><span class="btxt">裁剪</span>
+        </button>
+        <button v-if="toDoc" class="ghost" :disabled="!hasImageSel" title="把选中的图送进中间的 Word 文档" @click="emitToDoc">
+          <Icon name="convert" /><span class="btxt">进文档</span>
+        </button>
         <button class="ghost" :disabled="selIds.length < 2" title="拼接所选：多张图拼成一张，或多段文字合并成一段" @click="stitchSel"><Icon name="stitch" /></button>
         <button class="ghost" :disabled="selIds.length < 2" title="组合" @click="groupSel"><Icon name="group" /></button>
         <button class="ghost" :disabled="!selIds.length" title="拆分" @click="ungroupSel"><Icon name="ungroup" /></button>
@@ -1378,6 +1613,26 @@ import Icon from './Icon.vue'
           <button @click="openEraser">重置</button>
           <span class="spacer"></span>
           <button class="primary" :disabled="erase.busy" @click="eraserSave">{{ erase.busy ? '保存中…' : '保存并替换图片' }}</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="cropOn" class="cropmask">
+      <div class="cropcard">
+        <div class="crophead">
+          <b>裁剪这张图</b>
+          <span class="mut">在原图上拖一个框，框外会被裁掉</span>
+        </div>
+        <div class="crop-stage" @pointerdown="cropDown">
+          <img v-if="cropImg" :src="imgUrl(cropImg.path)" :style="{ width: cropImg.w * cropScale + 'px', height: cropImg.h * cropScale + 'px' }" draggable="false" />
+          <div v-if="cropBox.w > 0" class="cropbox" :style="cropStyle"></div>
+        </div>
+        <div class="cropbar">
+          <button class="ghost" @click="cropTransform('rot')">旋转 90°</button>
+          <button class="ghost" @click="cropTransform('flip')">水平翻转</button>
+          <span class="spacer" />
+          <button class="ghost" @click="cancelCrop">取消</button>
+          <button class="primary" @click="applyCrop">确定裁剪</button>
         </div>
       </div>
     </div>
@@ -1488,4 +1743,15 @@ import Icon from './Icon.vue'
 .erow input[type="range"] { width: 160px; }
 .rpreview { text-align: center; margin-bottom: 8px; }
 .rpreview img { max-width: 100%; max-height: 34vh; border: 1px solid var(--line); border-radius: 8px; }
+.cropmask { position: fixed; inset: 0; background: rgba(20, 24, 32, .55); z-index: 60;
+  display: flex; align-items: center; justify-content: center; }
+.cropcard { background: #fff; border-radius: 14px; padding: 16px; box-shadow: 0 24px 60px rgba(0,0,0,.28); }
+.crophead { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+.crop-stage { position: relative; overflow: hidden; cursor: crosshair; background: #f4f5f7;
+  border: 1px solid var(--line); border-radius: 8px; user-select: none; }
+.crop-stage img { display: block; pointer-events: none; }
+.cropbox { position: absolute; border: 1.5px dashed #2f6fed; background: rgba(47,111,237,.12); pointer-events: none; }
+.cropbar { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.cropbar .spacer { flex: 1; }
+.btxt { margin-left: 4px; font-size: 12px; }
 </style>

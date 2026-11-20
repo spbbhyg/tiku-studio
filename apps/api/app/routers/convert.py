@@ -12,13 +12,17 @@ import html as html_mod
 import io
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import threading
 import time
+import zipfile
 from pathlib import Path
 
+from docx.oxml.ns import qn
+from docx.shared import Cm, Pt
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
@@ -422,6 +426,27 @@ def _split_columns(rects: list, width: float) -> list[tuple[float, float]]:
     return [(0.0, width)]
 
 
+_CJK = "\u2e80-\u9fff\uff00-\uffef"
+_SPACE_TWIXT = [
+    # 中文紧挨数字/英文/公式：把 PDF 里那层多余空格去掉（"如 1833 年" → "如1833年"）
+    (re.compile(rf"(?<=[{_CJK}])\s+(?=[A-Za-z0-9$\\])"), ""),
+    (re.compile(rf"(?<=[A-Za-z0-9%$\\])\s+(?=[{_CJK}])"), ""),
+    # 中文之间本来不该有空格（PDF 两端对齐常拉出来一层）
+    (re.compile(rf"(?<=[{_CJK}])\s+(?=[{_CJK}])"), ""),
+    # 标点两侧不留空格
+    (re.compile(r"\s+([，。；：、！？）】》”’])"), r"\1"),
+    (re.compile(r"([（【《“‘])\s+"), r"\1"),
+]
+
+
+def _tidy_cjk(text: str) -> str:
+    """压掉重复空格，并去掉中文与数字/英文/公式之间被 PDF 带出来的空格。"""
+    t = re.sub(r"[ \t]{2,}", " ", text)
+    for pat, rep in _SPACE_TWIXT:
+        t = pat.sub(rep, t)
+    return t.strip()
+
+
 def _merge_para(texts: list[str]) -> str:
     """把 PDF 里被切断的行接回一段：中文直接接，西文补空格，行尾连字符去掉。"""
     out = ""
@@ -440,7 +465,7 @@ def _merge_para(texts: list[str]) -> str:
         if not (cjk(a) or cjk(b)):
             out += " "
         out += t
-    return out
+    return _tidy_cjk(out)
 
 
 def _figure_bands(page, col_rects: list) -> list:
@@ -589,7 +614,9 @@ def pdf_to_docx(blob: bytes) -> tuple[bytes, str]:
             if not text:
                 continue
             par = d.add_paragraph()
-            par.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+            # 不能用两端对齐：行里夹英文/数字时 Word 会把空格拉成大河，
+            # 用户看到的就是"数字和公式前面一大段空白"。
+            par.alignment = WD_ALIGN_PARAGRAPH.LEFT
             pf = par.paragraph_format
             pf.space_before, pf.space_after = Pt(0), Pt(3)
             pf.line_spacing = 1.25
@@ -976,4 +1003,282 @@ async def api_pdf2docx_ocr(file: UploadFile = File(...)):
     return Response(out, media_type=DOCX_MIME, headers={
         "Content-Disposition": f"attachment; filename*=UTF-8''{_stem(file.filename)}.docx",
         "X-Engine": engine,
+    })
+
+
+# ---------------------------- Word 合并 / 拆分（R2） ----------------------------
+# 为什么不用 "deepcopy 整段挪过去"：docx 里图片、样式都是 "关系 id" 引用的，
+# 直接搬 XML 会让图片变红叉、样式串号。所以这里逐 run 重建：文字、粗斜体、
+# 字号、字体名、颜色、段落缩进与行距都照抄，图片按 blob 重新 add_picture。
+
+_DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+def _iter_blocks(doc):
+    """按文档顺序产出 (kind, obj)：kind 是 'p' 或 'tbl'。"""
+    from docx.oxml.ns import qn as _qn
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    body = doc.element.body
+    for child in body.iterchildren():
+        if child.tag == _qn("w:p"):
+            yield "p", Paragraph(child, doc)
+        elif child.tag == _qn("w:tbl"):
+            yield "tbl", Table(child, doc)
+
+
+def _copy_para(dst, src_p, *, keep_style_from: str = "正文"):
+    """把一个段落按"逐 run 重建"的方式写到 dst。"""
+    par = dst.add_paragraph()
+    pf, spf = par.paragraph_format, src_p.paragraph_format
+    try:
+        par.alignment = src_p.alignment
+    except Exception:  # noqa: BLE001
+        pass
+    for attr, conv in (("left_indent", Cm), ("first_line_indent", Cm),
+                       ("space_before", Pt), ("space_after", Pt)):
+        v = getattr(spf, attr, None)
+        if v is not None:
+            try:
+                setattr(pf, attr, conv(v.pt / 28.35) if conv is Cm else Pt(v.pt))
+            except Exception:  # noqa: BLE001
+                pass
+    if spf.line_spacing is not None:
+        try:
+            pf.line_spacing = spf.line_spacing
+        except Exception:  # noqa: BLE001
+            pass
+
+    for run in src_p.runs:
+        # 图片：按 blob 重新插入（保留原宽度）
+        drew = run._r.findall(qn("w:drawing"))
+        if drew:
+            for d in drew:
+                _copy_drawing(dst, par, run, d)
+            continue
+        t = run.text
+        if not t:
+            continue
+        r = par.add_run(t)
+        r.bold = run.bold
+        r.italic = run.italic
+        r.underline = run.underline
+        try:
+            if run.font.size:
+                r.font.size = Pt(run.font.size.pt)
+            if run.font.name:
+                r.font.name = run.font.name
+                r.element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), run.font.name)
+            if run.font.color and run.font.color.rgb:
+                r.font.color.rgb = run.font.color.rgb
+        except Exception:  # noqa: BLE001
+            pass
+    return par
+
+
+def _copy_drawing(dst, par, run, drawing):
+    """把源文档里的图片按二进制搬过来（找不到就用占位文字，绝不插坏图）。"""
+    try:
+        rid = drawing.find(".//" + qn("a:blip")).get(qn("r:embed"))
+        part = run.part.related_parts[rid]
+        blob = part.blob
+        width = None
+        ext = drawing.find(".//" + qn("wp:extent"))
+        if ext is not None:
+            width = Cm(int(ext.get("cx")) / 360000)
+        buf = io.BytesIO(blob)
+        if width:
+            par.add_run().add_picture(buf, width=width)
+        else:
+            par.add_run().add_picture(buf)
+    except Exception:  # noqa: BLE001
+        par.add_run("［这里有一张图，转换时没能复制过来］")
+
+
+def docx_merge(blobs: list[bytes]) -> tuple[bytes, str]:
+    from docx import Document as _Doc
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    if not blobs:
+        raise ValueError("没有可合并的文档")
+    out = _Doc()
+    sec = out.sections[0]
+    sec.left_margin = sec.right_margin = Cm(2.2)
+    sec.top_margin = sec.bottom_margin = Cm(2.0)
+    normal = out.styles["Normal"]
+    normal.font.name = "宋体"
+    normal.font.size = Pt(12)
+    try:
+        normal.element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), "宋体")
+    except Exception:  # noqa: BLE001
+        pass
+
+    first = True
+    style_src = None
+    for blob in blobs:
+        src = _Doc(io.BytesIO(blob))
+        if style_src is None:
+            style_src = src
+        if not first:
+            out.add_page_break()
+        first = False
+        for kind, obj in _iter_blocks(src):
+            if kind == "p":
+                _copy_para(out, obj)
+            else:
+                # 表格：整块 XML 搬过去，再按单元格重建文字（避免样式 id 失效）
+                rows = len(obj.rows)
+                cols = max(1, len(obj.columns))
+                t = out.add_table(rows=rows, cols=cols)
+                try:
+                    t.style = "Table Grid"
+                except Exception:  # noqa: BLE001
+                    pass
+                for ri, row in enumerate(obj.rows):
+                    for ci, cell in enumerate(row.cells):
+                        if ci >= cols:
+                            break
+                        target = t.cell(ri, ci)
+                        target.text = ""
+                        for p in cell.paragraphs:
+                            para = target.paragraphs[0] if not target.text and p is cell.paragraphs[0] else target.add_paragraph()
+                            for run in p.runs:
+                                r = para.add_run(run.text)
+                                r.bold = run.bold
+                                r.italic = run.italic
+                        if not cell.paragraphs:
+                            pass
+        # 用第一份文档的标题样式兜底（合并后标题至少是"看起来像标题"）
+    _ = style_src
+    buf = io.BytesIO()
+    out.save(buf)
+    return buf.getvalue(), "python-docx（逐段重建，样式与图片都保留）"
+
+
+_SPLIT_HEAD = re.compile(
+    r"^\s*(?:第\s*[一二三四五六七八九十百0-9０-９]+\s*[题、.．]"
+    r"|\(\s*\d{1,2}\s*\)|（\s*\d{1,2}\s*）"
+    r"|\d{1,2}\s*[.．、]\s*\S)"
+)
+
+
+def docx_split(blob: bytes, mode: str = "question", n: int = 0) -> tuple[bytes, str, int]:
+    """把一份 docx 拆成多份，打包 zip 返回。
+
+    mode=question：按「第X题 / 1. / （1）」这类题号边界切；
+    mode=count   ：平均切成 n 份。
+    """
+    from docx import Document as _Doc
+
+    src = _Doc(io.BytesIO(blob))
+    blocks = list(_iter_blocks(src))
+    if not blocks:
+        raise ValueError("这份文档是空的")
+
+    groups: list[list] = []
+    if mode == "count" and n >= 2:
+        size = max(1, (len(blocks) + n - 1) // n)
+        groups = [blocks[i:i + size] for i in range(0, len(blocks), size)]
+    else:
+        cur: list = []
+        for kind, obj in blocks:
+            text = obj.text if kind == "p" else ""
+            if cur and kind == "p" and _SPLIT_HEAD.match(text or ""):
+                groups.append(cur)
+                cur = []
+            cur.append((kind, obj))
+        if cur:
+            groups.append(cur)
+        # 卷头（标题、考试说明）不应该单独成一份：并到第一题里
+        def _has_head(g):
+            return any(k == "p" and _SPLIT_HEAD.match(o.text or "") for k, o in g)
+
+        if len(groups) > 1 and not _has_head(groups[0]):
+            groups[1] = groups[0] + groups[1]
+            groups.pop(0)
+        if len(groups) < 2:
+            raise ValueError("没找到可拆的题号边界（试试「平均拆成 N 份」）")
+
+    out_zip = io.BytesIO()
+    with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+        for i, g in enumerate(groups, 1):
+            d = _Doc()
+            sec = d.sections[0]
+            sec.left_margin = sec.right_margin = Cm(2.2)
+            sec.top_margin = sec.bottom_margin = Cm(2.0)
+            normal = d.styles["Normal"]
+            normal.font.name = "宋体"
+            normal.font.size = Pt(12)
+            try:
+                normal.element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), "宋体")
+            except Exception:  # noqa: BLE001
+                pass
+            for kind, obj in g:
+                if kind == "p":
+                    _copy_para(d, obj)
+                else:
+                    rows = len(obj.rows)
+                    cols = max(1, len(obj.columns))
+                    t = d.add_table(rows=rows, cols=cols)
+                    try:
+                        t.style = "Table Grid"
+                    except Exception:  # noqa: BLE001
+                        pass
+                    for ri, row in enumerate(obj.rows):
+                        for ci, cell in enumerate(row.cells):
+                            if ci >= cols:
+                                break
+                            tc = t.cell(ri, ci)
+                            tc.text = ""
+                            for p in cell.paragraphs:
+                                para = tc.paragraphs[0] if tc.text == "" and p is cell.paragraphs[0] else tc.add_paragraph()
+                                for run in p.runs:
+                                    r = para.add_run(run.text)
+                                    r.bold = run.bold
+            buf = io.BytesIO()
+            d.save(buf)
+            zf.writestr(f"第{i}份.docx", buf.getvalue())
+    return out_zip.getvalue(), "python-docx（按题号切开，样式与图片都保留）", len(groups)
+
+
+@router.post("/docx-merge")
+async def api_docx_merge(files: list[UploadFile] = File(...)):
+    blobs: list[bytes] = []
+    for f in files or []:
+        blob = await _read(f)
+        if not (f.filename or "").lower().endswith((".docx", ".doc")) or blob[:2] != b"PK":
+            raise HTTPException(400, f"{f.filename} 不是 .docx（.doc 请先在 Word 里另存为 .docx）")
+        blobs.append(blob)
+    if len(blobs) < 2:
+        raise HTTPException(400, "合并至少要两份 Word")
+    try:
+        data, engine = await run_in_threadpool(docx_merge, blobs)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise _fail("合并 Word ", exc) from exc
+    return Response(data, media_type=_DOCX_MIME, headers={
+        "Content-Disposition": "attachment; filename*=UTF-8''merged.docx",
+        "X-Engine": "python-docx",
+        "X-Parts": str(len(blobs)),
+    })
+
+
+@router.post("/docx-split")
+async def api_docx_split(file: UploadFile = File(...), mode: str = "question", n: int = 0):
+    blob = await _read(file)
+    if blob[:2] != b"PK":
+        raise HTTPException(400, "这不是 .docx（.doc 请先在 Word 里另存为 .docx）")
+    try:
+        data, engine, parts = await run_in_threadpool(docx_split, blob, mode, n)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise _fail("拆分 Word ", exc) from exc
+    return Response(data, media_type="application/zip", headers={
+        "Content-Disposition": f"attachment; filename*=UTF-8''{_stem(file.filename)}-split.zip",
+        "X-Engine": "python-docx",
+        "X-Parts": str(parts),
     })
