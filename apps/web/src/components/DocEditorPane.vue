@@ -278,11 +278,20 @@ async function load() {
 
 function teardown() {
   stopCn()
+  if (chTimer) { clearTimeout(chTimer); chTimer = 0 }
   try { if (sd.value && sd.value.destroy) sd.value.destroy() } catch { /* 忽略 */ }
   sd.value = null
   ready.value = false
   if (tbEl.value) tbEl.value.innerHTML = ''
   if (edEl.value) edEl.value.innerHTML = ''
+}
+
+const emit = defineEmits(['changed'])
+// 文档内容改动节流：编辑器每敲一下都会触发，这里 800ms 合并成一次「改了」
+let chTimer = 0
+function markChanged() {
+  if (chTimer) return
+  chTimer = setTimeout(() => { chTimer = 0; emit('changed') }, 800)
 }
 
 /** 真正创建编辑器：document 可以是 URL，也可以是 File/Blob；不传就是空白文档 */
@@ -308,6 +317,9 @@ async function boot(document, name) {
       },
       onReady: () => { busy.value = false; ready.value = true; const root = tbEl.value && tbEl.value.closest ? tbEl.value.closest('.doce') : host; installCn(root || host); say(`已打开「${name || '空白文档'}」`) },
       onContentError: (p) => { busy.value = false; fail(p && p.error ? p.error : '文档打不开') },
+      // SuperDoc 没有 change 事件，只有 editor-update；这里节流后通知外面「文档变了」，
+      // DocDesk 收到就用它做自动保存（3 秒防抖）。
+      onEditorUpdate: () => { markChanged() },
     }
     if (document) opts.document = document
     sd.value = new SuperDoc(opts)
