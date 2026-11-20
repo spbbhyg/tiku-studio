@@ -18,23 +18,37 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from .config import WEB_DIST, ensure_dirs
+from .config import DATA_DIR, WEB_DIST, ensure_dirs
 from .db import SessionLocal, init_db
 from .routers import (workbench, wb_extra, lan, update as update_router, ai as ai_router, authoring, books, exam, github_sync,
                       manual, meta, paper_canvas, papers, questions, sets,
                       settings as settings_router, v2 as v2_router, reader,
-                      chemy as chemy_router, convert as convert_router, bench as bench_router, drafts as drafts_router, compose as compose_router,
+                      chemy as chemy_router, convert as convert_router, drafts as drafts_router, compose as compose_router,
                       doce as doce_router,
                       local_llm as local_router,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+# 0.5.3：日志同时落盘到 data/logs/app.log。
+# 用户报「导不出 / 转不了」时，让他把这个文件发过来就能定位，不用靠猜。
+try:
+    from logging.handlers import RotatingFileHandler
+
+    _logdir = DATA_DIR / "logs"
+    _logdir.mkdir(parents=True, exist_ok=True)
+    _fh = RotatingFileHandler(_logdir / "app.log", maxBytes=2 * 1024 * 1024,
+                              backupCount=3, encoding="utf-8")
+    _fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    logging.getLogger().addHandler(_fh)
+except Exception as _exc:                                     # noqa: BLE001
+    print(f"[log] 日志文件没建起来（不影响使用）：{_exc}")
 log = logging.getLogger("神奋")
 
 logger = logging.getLogger("tiku")
 
 app = FastAPI(
-    title="神奋", version="0.2.0",
+    title="神奋", version="0.5.3",
     description="题库与组卷（小学教材）+ 文献命题工作台（高校课程），共用资料库与题图服务",
 )
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
@@ -81,11 +95,27 @@ app.include_router(chemy_router.router)
 app.include_router(drafts_router.router)
 app.include_router(compose_router.router)
 app.include_router(convert_router.router)
-app.include_router(bench_router.router)
 app.include_router(doce_router.router)
 app.include_router(local_router.router)
 app.include_router(lan.router)
 app.include_router(update_router.router)
+
+
+@app.middleware("http")
+async def static_cache_control(request: Request, call_next):
+    """首页每次重新校验，带 hash 的静态资源才允许长缓存。
+
+    之前浏览器一直拿着旧 index.html，构建产物已经更新，用户看到的却还是旧菜单。
+    """
+    resp = await call_next(request)
+    path = request.url.path
+    if path in ("/", "/index.html"):
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+    elif path.startswith("/assets/"):
+        resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return resp
 
 
 @app.on_event("startup")

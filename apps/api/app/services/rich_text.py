@@ -290,11 +290,15 @@ def blocks_inline_html(blocks: list[dict]) -> str:
 
 # ---------------------------------------------------------------- Word 渲染
 def _ea(run, name: str = "宋体"):
+    """中文字体走 eastAsia，西文/数字走 Times New Roman —— 和预览的 paper.css 一致。"""
     from docx.oxml.ns import qn
-    run.font.name = name
+    run.font.name = "Times New Roman"
     try:
         rpr = run._element.get_or_add_rPr()
-        rpr.get_or_add_rFonts().set(qn("w:eastAsia"), name)
+        rf = rpr.get_or_add_rFonts()
+        rf.set(qn("w:ascii"), "Times New Roman")
+        rf.set(qn("w:hAnsi"), "Times New Roman")
+        rf.set(qn("w:eastAsia"), name)
     except Exception:  # noqa: BLE001 — 字体名设不上不影响内容
         pass
 

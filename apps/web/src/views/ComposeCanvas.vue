@@ -110,7 +110,7 @@ function onKeys(e) {
     const b = blocks.value.find((x) => x.id === id)
     if (!b) continue
     b.x = clamp(Math.round(b.x + delta[0]), 0, PW - (b.w || 100))
-    b.y = clamp(Math.round(b.y + delta[1]), 0, PH - 40)
+    b.y = clamp(Math.round(b.y + delta[1]), 0, pageH.value - 40)
   }
   e.preventDefault()
 }
@@ -119,6 +119,9 @@ const scale = ref(1)
 const autoAlign = ref(true)
 const trimBlank = ref(true)   // 保存时裁掉下方空白
 const contentBottom = ref(PH)  // 内容底部（pt），用于把画布页面缩到内容处
+/* #1：画布可无限拉长——页面高度至少一页，内容超过就自动加高，底部留 160pt 可继续放置 */
+const TAIL_PAD = 160
+const pageH = computed(() => (!blocks.value.length ? PH : Math.max(PH, contentBottom.value + TAIL_PAD)))
 
 function measureBottom() {
   const el = canvasEl.value
@@ -127,7 +130,7 @@ function measureBottom() {
   el.querySelectorAll('.blk').forEach((k) => {
     m = Math.max(m, (k.offsetTop + k.offsetHeight) / (scale.value || 1))
   })
-  contentBottom.value = (m <= 0 ? PH : Math.min(PH * 6, Math.max(PH, m + 24)))
+  contentBottom.value = (m <= 0 ? PH : Math.max(PH, m + 24))   // #1：不再封顶 6 页
 }
 
 watch([blocks, scale, trimBlank], () => nextTick(measureBottom), { deep: true })
@@ -149,7 +152,7 @@ function blockH(b) {
 
 function nextY() {
   const bottom = blocks.value.reduce((m, b) => Math.max(m, b.y + blockH(b)), 40)
-  return Math.min(PH * 6 - 40, Math.round(bottom + 10))
+  return Math.min(pageH.value - 40, Math.round(bottom + 10))
 }
 
 function rotateSel() {
@@ -194,7 +197,7 @@ async function addImage(path, atX, atY) {
   w = clamp(w, 160, PW - MARGIN * 2)
   const h = Math.round(w * ratio)
   const b = reactive({ id: uid(), type: 'image', path, x: MARGIN, y: 0, w, h })
-  b.y = atY != null ? clamp(Math.round(atY - h / 2), 0, PH * 6 - h - 10) : Math.min(PH * 6 - h - 20, nextY())
+  b.y = atY != null ? clamp(Math.round(atY - h / 2), 0, pageH.value - h - 10) : Math.min(pageH.value - h - 20, nextY())
   if (atX != null) {
     const cx = clamp(atX - w / 2, 0, Math.max(0, PW - w))
     if (autoAlign.value) {
@@ -219,6 +222,7 @@ function startDrag(e, b) {
   else if (b.gid && !e.altKey) selectGroupOf(b)
   const moving = blocks.value.filter((x) => isSel(x.id)).map((x) => ({ id: x.id, x: x.x, y: x.y }))
   drag = { ids: moving.length ? moving : [{ id: b.id, x: b.x, y: b.y }], sx: e.clientX, sy: e.clientY, kind: 'move' }
+  canvasDragging = true                // #2：拖动期间不做自动适配
   window.addEventListener('pointermove', onMove)
   window.addEventListener('pointerup', endDrag)
 }
@@ -226,6 +230,7 @@ function startDrag(e, b) {
 function startResize(e, b) {
   selectOnly(b.id)
   drag = { id: b.id, sx: e.clientX, sy: e.clientY, w: b.w, h: b.h, kind: 'size' }
+  canvasDragging = true
   window.addEventListener('pointermove', onMove)
   window.addEventListener('pointerup', endDrag)
 }
@@ -239,7 +244,7 @@ function onMove(e) {
       const t = blocks.value.find((x) => x.id === it.id)
       if (!t) continue
       t.x = clamp(Math.round(it.x + dx), 0, Math.max(0, PW - (t.w || 40)))
-      t.y = clamp(Math.round(it.y + dy), 0, Math.max(0, PH - (t.h || 40)))
+      t.y = clamp(Math.round(it.y + dy), 0, Math.max(0, pageH.value - (t.h || 40)))
     }
     if (autoAlign.value) {
       const p = blocks.value.find((x) => x.id === drag.ids[0].id)
@@ -261,6 +266,8 @@ function endDrag() {
   window.removeEventListener('pointermove', onMove)
   window.removeEventListener('pointerup', endDrag)
   drag = null
+  canvasDragging = false               // #2：松手后再校准一次
+  nextTick(() => fitScale())
 }
 
 function removeBlock(id) {
@@ -517,7 +524,7 @@ async function insertQuestion(q) {
   b.w = Math.min(PW - MARGIN * 2, Math.max(240, natW))
   b.h = Math.round(b.w * ratio)
   b.x = MARGIN
-  b.y = Math.min(b.y, PH * 6 - b.h - 20)   // addImage 已按内容底部排好，这里只做越界保护
+  b.y = Math.min(b.y, pageH.value - b.h - 20)   // addImage 已按内容底部排好，这里只做越界保护
   if (!usedIds.value.includes(q.id)) usedIds.value.push(q.id)
   msg.value = `已插入第 ${usedIds.value.length} 题`
 }
@@ -528,7 +535,7 @@ const savedId = ref(null)
 
 function payloadLayout() {
   return {
-    width: PW, height: Math.round(trimBlank.value ? contentBottom.value : PH),
+    width: PW, height: Math.round(pageH.value),
     blocks: blocks.value.map((b) => (b.type === 'image'
       ? { type: 'image', path: b.path, x: b.x, y: b.y, w: b.w, h: b.h, rotate: b.rotate || 0 }
       : { type: 'text', text: b.text, x: b.x, y: b.y, w: b.w, size: b.size, align: b.align, bold: b.bold })),
@@ -599,10 +606,21 @@ async function loadExisting(id) {
   }
 }
 
+let canvasDragging = false          // #2：拖拽期间冻结自动适配，避免抖动
 function fitScale() {
   const host = canvasEl.value ? canvasEl.value.parentElement : null
-  const w = host ? host.clientWidth : 800
-  scale.value = clamp((w - 40) / PW, 0.55, 2.6)
+  if (!host || canvasDragging) return
+  const w = host.clientWidth
+  if (w < 60) return
+  const next = clamp((w - 40) / PW, 0.55, 2.6)
+  if (Math.abs(next - scale.value) < 0.004) return   // 亚像素差异不重设，防 ResizeObserver 自激
+  const cx = (host.scrollLeft + host.clientWidth / 2) / (scale.value || 1)
+  const cy = (host.scrollTop + host.clientHeight / 2) / (scale.value || 1)
+  scale.value = next
+  nextTick(() => {
+    host.scrollLeft = Math.max(0, cx * next - host.clientWidth / 2)
+    host.scrollTop = Math.max(0, cy * next - host.clientHeight / 2)
+  })
 }
 
 let ro = null
@@ -782,7 +800,7 @@ const vFocus = { mounted(el) { el.focus() } }
       </div>
 
       <div class="canvas-wrap">
-        <div ref="canvasEl" class="page" :style="{ width: PW * scale + 'px', height: (trimBlank ? contentBottom : PH) * scale + 'px' }"
+        <div ref="canvasEl" class="page" :style="{ width: PW * scale + 'px', height: pageH * scale + 'px' }"
              @dragover.prevent @drop.prevent="dropOnCanvas" @pointerdown.self="clearSel">
           <div v-if="!blocks.length" class="empty">从题库插入题目、或把左侧裁好的题图拖进来，再从「＋ 文本」加标题</div>
           <div v-for="b in blocks" :key="b.id" class="blk"
@@ -810,7 +828,7 @@ const vFocus = { mounted(el) { el.focus() } }
       </div>
 
       <div class="foot">
-        <span class="muted">版面 {{ PW }} × {{ trimBlank ? Math.round(contentBottom) : PH }} pt（约 {{ Math.ceil((trimBlank ? contentBottom : PH) / PH) }} 页）· 共 {{ blocks.length }} 个元素</span>
+        <span class="muted">版面 {{ PW }} × {{ Math.round(pageH) }} pt（约 {{ Math.ceil(pageH / PH) }} 页）· 共 {{ blocks.length }} 个元素</span>
         <span class="muted" v-if="selectedText">已选文字：{{ selectedText.size }}pt · {{ selectedText.align }}</span>
       </div>
     </section>
@@ -865,8 +883,10 @@ const vFocus = { mounted(el) { el.focus() } }
 .spacer { flex: 1; }
 .chk { display: flex; align-items: center; gap: 5px; font-size: 12.5px; color: #475467; }
 
-.canvas-wrap { margin-top: 12px; background: #f1f3f7; border-radius: 10px; padding: 16px; display: flex; justify-content: center; max-height: calc(100vh - 200px); overflow: auto; }
-.page { position: relative; background: #fff; box-shadow: 0 6px 24px rgba(16, 24, 40, .1); flex: 0 0 auto; }
+/* #1/#2：与 CanvasPane 同一根因——flex 居中会把溢出部分推到负方向，滚动范围算不对；
+   scrollbar-gutter: stable 让滚动条常驻占位，杜绝「滚动条出现→宽度变→缩放变→再出现」的抖动。 */
+.canvas-wrap { margin-top: 12px; background: #f1f3f7; border-radius: 10px; padding: 16px 16px 45vh; display: block; max-height: max(320px, calc(100vh - 200px)); overflow: auto; scrollbar-gutter: stable; box-sizing: border-box; }
+.page { position: relative; background: #fff; box-shadow: 0 6px 24px rgba(16, 24, 40, .1); flex: 0 0 auto; margin: 0 auto; }
 .page .empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #98a2b3; font-size: 13px; text-align: center; padding: 0 40px; }
 .blk { position: absolute; cursor: move; }
 .blk.sel { outline: 1px dashed var(--brand, #2f6fed); outline-offset: 1px; }

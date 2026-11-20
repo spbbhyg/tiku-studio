@@ -200,12 +200,12 @@ def build_docx(questions: list[dict], opts: dict | None = None) -> bytes:
     from docx.shared import Cm, Pt, RGBColor
 
     def _ea(el, name: str):
-        """确保 rPr/rFonts 存在后设置东亚字体（python-docx 里 rPr 可能为 None）。"""
+        """确保 rPr/rFonts 存在后设置字体：西文 Times New Roman，中文按 name（出题页走宋体）。"""
         rpr = el.get_or_add_rPr()
         rf = rpr.get_or_add_rFonts()
         rf.set(qn("w:eastAsia"), name)
-        rf.set(qn("w:ascii"), name)
-        rf.set(qn("w:hAnsi"), name)
+        rf.set(qn("w:ascii"), "Times New Roman")
+        rf.set(qn("w:hAnsi"), "Times New Roman")
     o = _opts(opts or {})
     doc = Document()
 

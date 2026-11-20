@@ -1,5 +1,5 @@
 <template>
-  <div class="doce" @paste.capture="onPaste">
+  <div class="doce" @paste.capture="onPaste" @drop.capture="onTextDrop">
     <div class="dbar">
       <div class="row">
         <b>文档编辑</b>
@@ -94,6 +94,7 @@
 <script setup>
 import { onBeforeUnmount, onMounted, reactive, ref, shallowRef } from 'vue'
 import { api } from '../api.js'
+import { renderMath } from '../math.js'
 import { extractFromFrame } from '../ketcherSvg.js'
 import 'superdoc/style.css'
 
@@ -421,6 +422,19 @@ async function takeStruct() {
 }
 
 /* ---------------------------------------------------------------- 插图 */
+/** 从左侧「题目文本」拖到 Word：保留 $公式$，插入到当前光标处。 */
+async function onTextDrop(e) {
+  const dt = e && e.dataTransfer
+  if (!dt || (dt.files && dt.files.length)) return
+  const text = String(dt.getData('text/plain') || '').trim()
+  if (!text || text.startsWith('images/')) return
+  e.preventDefault()
+  e.stopPropagation()
+  const html = text.split(/\n+/).filter(Boolean).map((line) => `<p>${renderMath(line.trim())}</p>`).join('')
+  const ok = await insertHtml(html, { atEnd: false })
+  if (ok) say('已把文字插到光标处')
+}
+
 /** 粘贴：Word 引擎本身不处理图片粘贴，这里接住，走我们自己的插图通道。 */
 async function onPaste(e) {
   const cd = e && e.clipboardData
@@ -564,8 +578,16 @@ onBeforeUnmount(teardown)
 .bad { margin: 0 0 8px; padding: 6px 10px; border-radius: 8px; background: #fff5f4; color: #b42318; font-size: 12px; }
 .host { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column;
   border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: #f7f8fa; }
-.tb { flex: none; }
+.tb { flex: none; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; scrollbar-color: #cfd6e2 transparent; }
+.tb::-webkit-scrollbar { height: 6px; }
+.tb::-webkit-scrollbar-thumb { background: #cfd6e2; border-radius: 3px; }
 .tb :deep(*) { max-width: 100%; }
+.tb :deep(.superdoc-toolbar), .tb :deep(.toolbar), .tb :deep([class*="toolbar"]) {
+  flex-wrap: nowrap !important;
+  overflow-x: auto !important;
+  overflow-y: hidden !important;
+}
+.tb :deep(.superdoc-toolbar) > *, .tb :deep(.toolbar) > * { flex: 0 0 auto !important; }
 .ed { flex: 1; min-height: 0; overflow: auto; }
 .empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center;
   justify-content: center; gap: 6px; text-align: center; padding: 40px; background: #f7f8fa; }

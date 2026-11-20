@@ -11,10 +11,15 @@
       <button class="tab" :class="{ on: docTab === 'a' }" title="答案文档" @click="switchTab('a')">答案文档</button>
       <button class="ghost sm" title="新建一份空白文档，接在当前标签下" @click="newDoc">新建</button>
       <span class="grow" />
-      <button class="btn" :disabled="!textHasContent" title="把左边写的题目按排版写进中间的 Word 末尾" @click="emitDraft">
+      <button class="btn" :disabled="!textHasContent" title="把左边写的题目按排版写进中间的 Word 末尾" @click="emitDraft(true)">
         生成排版稿 →
       </button>
-      <button class="btn" title="把画布上的图片依次插进 Word 末尾" @click="pushCanvasImages">画布图片进文档</button>
+      <button class="btn" :disabled="!textHasContent" title="保留 $公式$，插入到 Word 当前光标处" @click="emitDraft(false)">
+        插入到光标处
+      </button>
+      <button class="btn" title="把画布上的图片依次插进 Word 当前光标处" @click="pushCanvasImages">画布图片进文档</button>
+      <button class="btn" :disabled="importing" title="图片直接进画布；PDF 自动逐页转图进画布" @click="pickCanvasFiles">导入图片/PDF</button>
+      <input ref="canvasFileEl" type="file" accept="application/pdf,image/*" multiple hidden @change="onPickCanvasFiles" />
       <span class="sep" />
       <button class="fold" :title="rf ? '展开右栏（画布）' : '收起右栏，给文档腾地方'" @click="toggleR">
         {{ rf ? '«' : '»' }}
@@ -56,11 +61,15 @@
 <script setup>
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { api } from '../api.js'
+import { renderMath } from '../math.js'
+import { importPdfToCanvas, isCanvasImage, isCanvasPdf, uploadImageToCanvas } from '../canvasImport.js'
 import CanvasPane from './CanvasPane.vue'
 import DocEditorPane from './DocEditorPane.vue'
 
 const docRef = ref(null)
 const paneRef = ref(null)
+const canvasFileEl = ref(null)
+const importing = ref(false)
 const lf = ref(false)
 const rf = ref(false)
 const docTab = ref('q')
@@ -156,11 +165,11 @@ function buildHtml() {
   const stem = String(txt.stem || '').trim()
   const ans = String(txt.answer || '').trim()
   const parts = []
-  if (title) parts.push(`<p><strong>${esc(title)}</strong></p>`)
+  if (title) parts.push(`<p><strong>${renderMath(title)}</strong></p>`)
   stem.split(/\n+/).forEach((line) => {
     const t = line.trim()
     if (!t) return
-    parts.push(`<p>${esc(t)}</p>`)
+    parts.push(`<p>${renderMath(t)}</p>`)
   })
   if (ans) {
     parts.push('<p>&nbsp;</p>')
@@ -168,19 +177,20 @@ function buildHtml() {
     ans.split(/\n+/).forEach((line) => {
       const t = line.trim()
       if (!t) return
-      parts.push(`<p>${esc(t)}</p>`)
+      parts.push(`<p>${renderMath(t)}</p>`)
     })
   }
   return parts.join('')
 }
 
-async function emitDraft() {
+async function emitDraft(atEnd = true) {
   if (!textHasContent.value) return
   const html = buildHtml()
   const fn = docRef.value && docRef.value.insertHtml
   if (typeof fn !== 'function') { dsay('内部错误：insertHtml 没暴露出来'); return }
-  const ok = await fn(html, { atEnd: true })
-  if (ok) { docChanged.value = true; dsay('已写进文档末尾') } else { dsay('写入被拒：' + (docRef.value.lastError ? docRef.value.lastError() : '未知原因')) }
+  const ok = await fn(html, { atEnd })
+  if (ok) { docChanged.value = true; dsay(atEnd ? '已写进文档末尾' : '已插入到当前光标处') }
+  else { dsay('写入被拒：' + (docRef.value.lastError ? docRef.value.lastError() : '未知原因')) }
 }
 
 /** 把画布上的图片按顺序插进文档 */
@@ -206,12 +216,42 @@ async function pushCanvasImages() {
   docChanged.value = true
 }
 
-async function onCanvasFiles({ files }) {
-  // 画布上拖进来的图片：交给 DocEditorPane 直接进文档（同时留在画布上）
-  for (const f of files || []) {
-    if (/^image\//.test(f.type) && docRef.value && docRef.value.insertFile) {
-      await docRef.value.insertFile(f)
+async function onCanvasFiles({ files, x, y }) {
+  await importCanvasFiles(files, x, y)
+}
+
+function pickCanvasFiles() { canvasFileEl.value && canvasFileEl.value.click() }
+
+async function onPickCanvasFiles(ev) {
+  const files = Array.from((ev.target && ev.target.files) || [])
+  ev.target.value = ''
+  await importCanvasFiles(files, null, null)
+}
+
+async function importCanvasFiles(files, x, y) {
+  const pane = paneRef.value
+  if (!pane || importing.value) return
+  const list = Array.from(files || [])
+  if (!list.length) return
+  importing.value = true
+  try {
+    for (const f of list) {
+      if (isCanvasImage(f)) {
+        dsay(`正在导入图片「${f.name}」…`)
+        await uploadImageToCanvas(f, pane, x, y)
+      } else if (isCanvasPdf(f)) {
+        await importPdfToCanvas(f, pane, dsay)
+      } else {
+        dsay(`「${f.name}」不是图片或 PDF，没有导入`)
+      }
+      x = null
+      y = null
     }
+    dsay('导入完成：可以继续排版，或点「画布图片进文档」')
+  } catch (e) {
+    dsay(`导入失败：${e?.message || e}`)
+  } finally {
+    importing.value = false
   }
 }
 </script>
@@ -219,8 +259,10 @@ async function onCanvasFiles({ files }) {
 <style scoped>
 .desk { display: flex; flex-direction: column; height: calc(100vh - 108px); min-height: 0; padding: 0 2px; }
 .dtop { display: flex; align-items: center; gap: 6px; padding: 6px 8px; background: #fff;
-  border: 1px solid var(--line); border-radius: 12px; margin-bottom: 8px; min-width: 0; }
-.dtop .grow { flex: 1; }
+  border: 1px solid var(--line); border-radius: 12px; margin-bottom: 8px; min-width: 0;
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; scrollbar-color: #cfd6e2 transparent; }
+.dtop > .btn, .dtop > .tab, .dtop > .fold, .dtop > .lbl, .dtop > .sep { flex: 0 0 auto; white-space: nowrap; }
+.dtop .grow { flex: 1 0 8px; }
 .dtop .lbl { font-size: 12.5px; color: #667085; }
 .dtop .sep { width: 1px; height: 16px; background: var(--line); }
 .dtop .fold { width: 26px; height: 26px; padding: 0; border: 1px solid var(--line); border-radius: 8px;

@@ -64,8 +64,17 @@ async function ksetFromSmiles() {
   const r = await kpost({ type: 'ketcher:set', molfile: v })
   kMsg.value = r.ok ? '已载入画板，可继续增删原子' : ('载入失败：' + (r.error || ''))
 }
-async function ktake() {
-  // 先读整块画布的 SVG：Ketcher 拒绝把带反应箭头的结构存成 MOL，
+/* #11：把选中的末端原子改写成基团标签（Ketcher 原生 alias），而不是贴一个游离文本框 */
+const kAlias = ref('')
+async function ksetAlias() {
+  const v = kAlias.value.trim()
+  if (!v) { kMsg.value = '先输入基团缩写，例如 Ac、OAc、NO2'; return }
+  if (!kReady.value) { kMsg.value = '画板还没加载好'; return }
+  const r = await kpost({ type: 'ketcher:alias', alias: v })
+  kMsg.value = r.ok ? `已把选中原子改写成 ${v}（可以继续成键）` : ('改写失败：' + (r.error || ''))
+}
+
+async function ktake() {  // 先读整块画布的 SVG：Ketcher 拒绝把带反应箭头的结构存成 MOL，
   // 只靠 molfile 会让"画了箭头就取不出图"，这正是用户报的 bug。
   const whole = extractFromFrame(kframe.value)
   const r = whole ? { ok: true, molfile: '' } : await kpost({ type: 'ketcher:get' })
@@ -218,6 +227,13 @@ async function insertStruct() {
           <button class="primary" :disabled="!kReady" @click="ktake">取结构出图并插入</button>
           <span class="muted">{{ kReady ? '画完后点右边那个' : '画板加载中…' }}</span>
         </div>
+        <div class="kbar alias">
+          <input v-model="kAlias" class="ta alias" placeholder="末端基团缩写，如 Ac / OAc / NO2"
+                 @keyup.enter="ksetAlias" />
+          <button :disabled="!kReady" title="在画板里点选末端原子，再点这里：它会变成可继续成键的原子标签"
+                  @click="ksetAlias">设为基团标签</button>
+          <span class="muted">先在画板里点选末端原子</span>
+        </div>
         <iframe v-if="kMounted" ref="kframe" class="kframe" src="/ketcher/index.html"
                 title="结构式画板" @load="kping"></iframe>
         <div v-if="kMsg" class="muted kmsg">{{ kMsg }}</div>
@@ -264,6 +280,9 @@ async function insertStruct() {
 .pv.struct { display: flex; align-items: center; justify-content: center; }
 .svgbox :deep(svg) { max-width: 100%; height: auto; }
 .err { color: #b91c1c; font-size: 12px; margin-bottom: 6px; }
+.ta.alias { flex: 1 1 140px; min-width: 0; height: 28px; padding: 0 8px; }
+.kbar.alias { display: flex; align-items: center; gap: 6px; }
+.kbar.alias button { height: 28px; padding: 0 10px; border-radius: 6px; border: 1px solid #d1d5db; background: #fff; font-size: 12.5px; cursor: pointer; }
 .acts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .acts button { height: 28px; padding: 0 10px; border-radius: 6px; border: 1px solid #d1d5db; background: #fff; font-size: 12.5px; cursor: pointer; }
 .acts button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }

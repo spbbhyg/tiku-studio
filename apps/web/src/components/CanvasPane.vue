@@ -56,12 +56,35 @@ function blockH(b) {
 }
 
 const limit = computed(() => props.maxPages * PH)
+/* #1 根因：文字块的真实高度（折行 / 公式图 / 行距）比按字数估算高得多，
+   估算低估内容底部 → 页面高度小于实际内容 → 滚到“页面底”时最后的题被切在页面外。
+   改为 DOM 实测：量每个 .blk 的 offsetTop+offsetHeight（除以缩放），取最大值；
+   按字数的估算只在首帧 DOM 还没量出来前兜底。 */
+const measuredBottom = ref(0)
+function measureBottom() {
+  const host = canvasEl.value
+  if (!host) return
+  let m = 0
+  host.querySelectorAll(':scope > .blk').forEach((el) => {
+    m = Math.max(m, (el.offsetTop + el.offsetHeight) / (scale.value || 1))
+  })
+  measuredBottom.value = m
+}
+const estimatedBottom = computed(() => blocks.value.reduce((x, b) => Math.max(x, b.y + blockH(b)), 0))
 const contentBottom = computed(() => {
-  const m = blocks.value.reduce((x, b) => Math.max(x, b.y + blockH(b)), 0)
+  const m = Math.max(measuredBottom.value, estimatedBottom.value)
   if (m <= 0) return Math.min(limit.value, 420)      // 空画布给个短画布，不用整页
-  return Math.min(limit.value, Math.max(260, m + 24))
+  return Math.max(260, m + 24)      // 不再被 maxPages 封顶：内容往下放、页面就往下长
 })
-const pageHeight = computed(() => (trimBlank.value ? contentBottom.value : limit.value))
+/* #1：画布可无限拉长。
+   页面高度 = max(内容底部 + 尾部预留, 基础页高)。
+   TAIL_PAD 让「拖到内容底部」时下面永远还有空位可放，放下去 contentBottom 就变长，
+   页面跟着变长——形成「往下拖 → 页面长高 → 还能继续拖」的正循环，不再卡在 maxPages×单页高。 */
+const TAIL_PAD = 160
+const pageHeight = computed(() => {
+  if (!blocks.value.length) return trimBlank.value ? 420 : limit.value
+  return Math.max(trimBlank.value ? 0 : limit.value, contentBottom.value + TAIL_PAD)
+})
 const selected = computed(() => blocks.value.find((b) => b.id === selectedId.value) || null)
 const selectedText = computed(() => (selected.value && selected.value.type === 'text' ? selected.value : null))
 const lockedImages = computed(() => blocks.value.filter((b) => b.type === 'image' && b.locked))
@@ -742,14 +765,14 @@ function nudge(dx, dy) {
     const b = blocks.value.find((x) => x.id === id)
     if (!b) continue
     b.x = clamp(Math.round(b.x + dx), 0, PW - (b.w || 100))
-    b.y = clamp(Math.round(b.y + dy), 0, limit.value - 40)
+    b.y = clamp(Math.round(b.y + dy), 0, pageHeight.value - 40)
   }
   emit('changed')
 }
 
 function nextY() {
   const bottom = blocks.value.reduce((m, b) => Math.max(m, b.y + blockH(b)), 40)
-  return Math.min(limit.value - 60, Math.round(bottom + 10))
+  return Math.min(pageHeight.value - 60, Math.round(bottom + 10))
 }
 
 function addText(text = '') {
@@ -839,7 +862,7 @@ async function addImage(path, atX, atY, fullWidth = false, opts = {}) {
   const h = Math.round(w * ratio)
   const b = reactive({ id: uid(), type: 'image', path: p, x: MARGIN, y: 0, w, h,
                        pxPerPt, fontPt })
-  b.y = atY != null ? clamp(Math.round(atY - h / 2), 0, limit.value - h - 10) : Math.min(limit.value - h - 20, nextY())
+  b.y = atY != null ? clamp(Math.round(atY - h / 2), 0, pageHeight.value - h - 10) : Math.min(pageHeight.value - h - 20, nextY())
   if (atX != null) {
     const cx = clamp(atX - w / 2, 0, Math.max(0, PW - w))
     if (autoAlign.value) {
@@ -1004,6 +1027,7 @@ function startDrag(e, b) {
   if (b.gid) liftGroupToTop(b.gid)
   const moving = blocks.value.filter((x) => isSel(x.id)).map((x) => ({ id: x.id, x: x.x, y: x.y }))
   drag = { ids: moving.length ? moving : [{ id: b.id, x: b.x, y: b.y }], sx: e.clientX, sy: e.clientY, kind: 'move', gid: b.gid || null }
+  dragging = true                 // #2：拖动期间冻结自动适配，松手后再按容器宽度校准一次
   window.addEventListener('pointermove', onMove)
   window.addEventListener('pointerup', endDrag)
 }
@@ -1038,6 +1062,7 @@ function startResize(e, b) {
   if (b.type === 'image' && b.locked) { tip.value = '图片已固定，先点「解锁图片」才能缩放'; return }
   selectOnly(b.id)
   drag = { id: b.id, sx: e.clientX, sy: e.clientY, w: b.w, h: b.h, kind: 'size' }
+  dragging = true
   window.addEventListener('pointermove', onMove)
   window.addEventListener('pointerup', endDrag)
 }
@@ -1058,7 +1083,9 @@ function onMove(e) {
       loX = Math.max(loX, -it.x)
       hiX = Math.min(hiX, Math.max(0, PW - w) - it.x)
       loY = Math.max(loY, -it.y)
-      hiY = Math.min(hiY, Math.max(0, limit.value - h) - it.y)
+      // #1：上界用「实际页面高度」而不是 maxPages*PH，
+      // 否则元素能被拖到看不见的空白页里，看起来像"卡住不动/被停住"
+      hiY = Math.min(hiY, Math.max(0, pageHeight.value - h) - it.y)
     }
     const minDx = Math.min(loX, hiX)
     const maxDx = Math.max(loX, hiX)
@@ -1090,18 +1117,40 @@ function endDrag() {
   window.removeEventListener('pointermove', onMove)
   window.removeEventListener('pointerup', endDrag)
   drag = null
+  // #2：松手后才允许重新适配；先等一帧让布局落定，避免在同一帧里改尺寸又触发回调
+  dragging = false
+  nextTick(() => fitScale())
 }
 
 // ---------- 缩放适配 ----------
 const canvasEl = ref(null)
+let dragging = false              // #2：拖拽/缩放期间冻结自动适配，避免「内容变→尺变→抖动」
 function fitScale() {
   const host = canvasEl.value ? canvasEl.value.parentElement : null
-  const w = host ? host.clientWidth : 760
+  if (!host) return
+  const w = host.clientWidth
+  if (w < 60 || dragging) return
   // 让 A4 画布铺满可用宽度（原来上限 1.15，宽屏下左右会空出一大块）
-  scale.value = clamp(w / PW, 0.35, 2.6)
+  const next = clamp(w / PW, 0.35, 2.6)
+  // 阈值判断：亚像素差异不重设，否则 ResizeObserver 会自激振荡（#2 抖动的直接原因）
+  if (Math.abs(next - scale.value) < 0.004) return
+  // 缩放后保持视觉中心，滚动范围由内容高度自然重算（#1）
+  const cx = (host.scrollLeft + host.clientWidth / 2) / (scale.value || 1)
+  const cy = (host.scrollTop + host.clientHeight / 2) / (scale.value || 1)
+  scale.value = next
+  nextTick(() => {
+    host.scrollLeft = Math.max(0, cx * next - host.clientWidth / 2)
+    host.scrollTop = Math.max(0, cy * next - host.clientHeight / 2)
+  })
 }
 let ro = null
-onMounted(() => { fitScale(); ro = new ResizeObserver(fitScale); if (canvasEl.value?.parentElement) ro.observe(canvasEl.value.parentElement) })
+onMounted(() => {
+  fitScale()
+  ro = new ResizeObserver(() => { if (!dragging) fitScale() })
+  if (canvasEl.value?.parentElement) ro.observe(canvasEl.value.parentElement)
+})
+/* 内容（位置/文字/缩放）一变就重测底部：页面高度实时跟上真实内容 */
+watch([blocks, scale, trimBlank], () => nextTick(measureBottom), { deep: true })
 onBeforeUnmount(() => { if (ro) ro.disconnect() })
 
 // ---------- 拖放（来自左栏裁剪 / 从桌面拖入图片或 PDF） ----------
@@ -1372,8 +1421,24 @@ import Icon from './Icon.vue'
 .metabox { background: #f8fafc; border: 1px solid var(--line, #e7ebf2); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; }
 .bandrow { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 6px; }
 .bandrow input { flex: 1 1 180px; min-width: 140px; }
-.canvas-wrap { overscroll-behavior: contain; background: #fff; border-radius: 10px; padding: 0; display: flex; justify-content: center; max-height: calc(100vh - 260px); overflow: auto; }
-.page { position: relative; background: #fff; box-shadow: none; flex: 0 0 auto; }
+/* #1/#2：滚动容器不能再靠 flex 居中——flex 居中时内容比容器大，溢出部分会被推到负方向裁掉，
+   滚动条也只按"居中后"的范围算，于是出现"没滚到底就被停住"。
+   同时用 scrollbar-gutter: stable 常驻预留滚动条位置：滚动条出现/消失不再改变 clientWidth，
+   ResizeObserver 就不会被反复触发，边界抖动随之消失。 */
+.canvas-wrap {
+  overscroll-behavior: contain;
+  background: #fff;
+  border-radius: 10px;
+  padding: 0;
+  display: block;
+  max-height: max(320px, calc(100vh - 230px));
+  overflow: auto;
+  scrollbar-gutter: stable;
+  box-sizing: border-box;
+  /* 底部留白约一屏：#1 要求滚到底时最后一行内容不被贴死在容器下沿 */
+  padding-bottom: 45vh;
+}
+.page { position: relative; background: #fff; box-shadow: none; flex: 0 0 auto; margin: 0 auto; }
 .page .empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #98a2b3; font-size: 13px; text-align: center; padding: 0 40px; }
 .marquee { position: absolute; border: 1px dashed var(--brand, #2f6fed); background: rgba(47, 111, 237, .1); pointer-events: none; z-index: 5; }
 .blk { position: absolute; cursor: move; }

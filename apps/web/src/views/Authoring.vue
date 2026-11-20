@@ -2018,16 +2018,25 @@ onBeforeUnmount(() => {
 .sbtn.on { color: #fff; background: var(--brand, #2563eb); border-color: var(--brand, #2563eb); }
 .sbtn.on b { background: rgba(255, 255, 255, .25); color: #fff; }
 
+/* #3c：工具栏以前 flex-wrap 换行，窗口一窄就被左右面板挤掉几个按钮（换行后落到面板下面看不见）。
+   改成单行不换行 + 横向滚动：按钮保持原宽，放不下就横着滑，永远点得到。 */
 .wtools {
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  display: flex; align-items: center; gap: 6px;
+  flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden;
+  scrollbar-width: thin; scrollbar-color: #cfd6e2 transparent;
   background: #fff; border: 1px solid var(--line, #e7ebf2); border-radius: 12px;
   padding: 6px 10px; position: sticky; top: 8px; z-index: 30;
   box-shadow: 0 1px 2px rgba(16,24,40,.04);
 }
+.wtools::-webkit-scrollbar { height: 6px; }
+.wtools::-webkit-scrollbar-thumb { background: #cfd6e2; border-radius: 3px; }
+.wtools::-webkit-scrollbar-track { background: transparent; }
 .wt {
   display: inline-flex; align-items: center; gap: 4px; height: 30px; padding: 0 12px;
+  flex: 0 0 auto;                       /* 不许被压缩，保证文字完整 */
   border: 1px solid var(--line, #e7ebf2); background: #fff; color: #1f2937;
   border-radius: 8px; font-size: 13px; cursor: pointer;
+  white-space: nowrap;
 }
 .wt:hover { border-color: var(--brand, #2563eb); color: var(--brand, #2563eb); }
 .wt.on { background: var(--brand, #2563eb); border-color: var(--brand, #2563eb); color: #fff; }

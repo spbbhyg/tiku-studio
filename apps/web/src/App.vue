@@ -15,7 +15,6 @@ const navs = [
   { path: '/drafts', label: '草稿' },
   { path: '/bank', label: '题库' },
   { path: '/compose', label: '组卷' },
-  { path: '/bench', label: '样卷对标' },
   { path: '/convert', label: '格式转换' },
   { path: '/ai', label: 'AI 工作台' },
   { path: '/papers', label: '试卷' },

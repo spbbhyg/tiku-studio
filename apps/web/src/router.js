@@ -13,7 +13,6 @@ import Settings from './views/Settings.vue'
 import Authoring from './views/Authoring.vue'
 import BankLocal from './views/BankLocal.vue'
 import Compose from './views/Compose.vue'
-import Bench from './views/Bench.vue'
 import Convert from './views/Convert.vue'
 import Drafts from './views/Drafts.vue'
 
@@ -29,7 +28,6 @@ export default createRouter({
     { path: '/drafts', component: Drafts },
     // 组卷：从本地题库勾题 → A4 实时预览 → 自动页脚 → 导出 PDF/DOCX
     { path: '/compose', component: Compose },
-  { path: '/bench', component: Bench },
     // 格式转换：docx ↔ pdf，本地转
     { path: '/convert', component: Convert },
     { path: '/compose/canvas', component: ComposeCanvas },
@@ -44,6 +42,8 @@ export default createRouter({
     { path: '/smart', redirect: '/ai' },
     { path: '/exam', redirect: '/author?mode=paper' },
     { path: '/settings', component: Settings },
+    // 0.5.3：删掉「样卷对标」（/bench），老书签统一回首页
+    { path: '/bench', redirect: '/' },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
 })

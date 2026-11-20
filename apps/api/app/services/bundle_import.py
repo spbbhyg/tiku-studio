@@ -200,6 +200,15 @@ def _import_questions(session: Session, data: dict, source_dir: Path | None) -> 
                         break
         images = [_save_image(meta["title"], i, item, source_dir)
                   for i, item in enumerate(q.get("images", []))]
+        # #8：答案区的图片以前被整段丢掉。答案图和题干图存在同一列 images，
+        # 用 caption="答案" 区分——这与出题页 routers/authoring.py 的写法一致，
+        # 导出 Word/PDF 时共用同一套取图逻辑，不额外开一套字段。
+        # 编号接着题干图续写，避免 0000.png 把题干图覆盖掉。
+        for item in (q.get("answer_images") or []):
+            saved = _save_image(meta["title"], len(images), item, source_dir)
+            if not saved.get("caption"):
+                saved["caption"] = "答案"
+            images.append(saved)
         values = dict(
             book_id=book.id,
             source_textbook_id=textbook.id if textbook else None,

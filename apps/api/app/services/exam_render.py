@@ -757,6 +757,70 @@ def _sub_html(sub: dict, no: str, part: str, tpl: dict, level: int, ctx: dict | 
     return f'<div class="sub{long_cls}">{inner}{ans_html}{nested}</div>'
 
 
+def _sub_answer_html(sub: dict, no: str, tpl: dict, ctx: dict) -> str:
+    """「参考答案与解析」卷里的一小题：只有答案，不带题干。没内容就不输出，编号也不会空一截。"""
+    ans = str(sub.get("answer") or "").strip()
+    aimg = _figures(sub.get("answer_images") or [], tpl, ctx)
+    points = sub.get("points") or []
+    subs = sub.get("subs") or []
+    nested = ""
+    for i, child in enumerate(subs, 1):
+        no2 = "" if (len(subs) == 1 and not (child.get("subs") or [])) else (f"{no}-{i}" if no else f"{i}")
+        nested += _sub_answer_html(child, no2, tpl, ctx)
+    if not ans and not aimg and not points and not nested:
+        return ""
+    score = sub.get("score")
+    sc = _fmt(score) if score not in (None, "", 0, "0") else ""
+    bits = ['<div class="sub">']
+    if sc and not subs:
+        lbl = (f"{_esc(no)} " if no else "本题") + f"共{sc} 分"
+        bits.append(f'<p class="body"><span class="scmark">{lbl}</span></p>')
+    if ans:
+        bits.append(sub.get("answer_html") or _paras(ans, True))
+    bits.append(aimg)
+    for pt in points:
+        txt = str((pt.get("text") if isinstance(pt, dict) else pt) or "").strip()
+        if not txt:
+            continue
+        psc = pt.get("score") if isinstance(pt, dict) else None
+        mark = f' <span class="scmark">（{_fmt(psc)} 分）</span>' if psc not in (None, "") else ""
+        bits.append(f'<p class="body pointline">{_inline(txt)}{mark}</p>')
+    bits.append(nested)
+    bits.append("</div>")
+    return "".join(bits)
+
+
+def _answer_item_html(item: dict, idx: int, items: list[dict], total: float,
+                      tpl: dict, ctx: dict) -> str:
+    """答案卷里的一道题：题号、题名与题目卷一一对应，但不重复题干。"""
+    number = int(item.get("number") or idx)
+    score = item.get("score") or 0
+    head_txt = tpl["scoreFormat"].format(
+        n=number, title=_inline(str(item.get("title") or "").strip()),
+        score=_fmt(score), percent="")
+    if not (tpl.get("score") or {}).get("show", True) and item.get("showScore") is False:
+        head_txt = head_txt.split("（")[0]
+    subs = item.get("subs") or []
+    if subs:
+        body = ""
+        for i, sub_node in enumerate(subs, 1):
+            no = "" if (len(subs) == 1 and not (subs[0].get("subs") or [])) else f"{number}-{i}"
+            body += _sub_answer_html(sub_node, no, tpl, ctx)
+    else:
+        ans = str(item.get("answer") or "").strip()
+        aimg = _figures(item.get("answer_images") or [], tpl, ctx)
+        if not ans and not aimg:
+            return ""
+        lead = ""
+        if float(score or 0) > 0:
+            lead = f'<p class="body"><span class="scmark">本题共{_fmt(score)} 分</span></p>'
+        body_out = item.get("answer_html") or _paras(ans, True)
+        body = f'<div class="ansblock">{lead}{body_out}{aimg}</div>'
+    if not body.strip():
+        return ""
+    return f'<div class="item" data-number="{number}"><h2 class="qhead"><span class="qnum">{head_txt}</span></h2>{body}</div>'
+
+
 def build_doc_html(doc: dict, part: str = "questions") -> str:
     """doc = {title, subtitle, duration, total_score, template, exam, items:[...]}"""
     doc = dict(doc or {})
@@ -779,6 +843,9 @@ def build_doc_html(doc: dict, part: str = "questions") -> str:
             total = 0.0
 
     out: list[str] = []
+    # #5a：题目与答案不再交错——题目卷先排完，答案另起一页放「参考答案与解析」。
+    # part=questions 只出题目；part=answers 只出答案卷；part=all 两段都出。
+    eff_part = "questions" if part == "all" else part
     out.append(_head(doc, tpl, part))
     out.append('<div class="sheet"><div class="sheet-inner">')
     title = str(doc.get("title") or "").strip()
@@ -807,8 +874,8 @@ def build_doc_html(doc: dict, part: str = "questions") -> str:
             subs = item.get("subs") or []
             # 只有一个没有子问的「小问」时，不显示 1-1 编号（单块题目）
             no = "" if (len(subs) == 1 and not (subs[0].get("subs") or [])) else f"{number}-{i}"
-            out.append(_sub_html(sub_node, no, part, tpl, 0, ctx))
-        if part in ("answers", "all"):
+            out.append(_sub_html(sub_node, no, eff_part, tpl, 0, ctx))
+        if eff_part in ("answers", "all"):
             ans = str(item.get("answer") or "").strip()
             aimg = _figures(item.get("answer_images") or [], tpl, ctx)
             if ans or aimg:
@@ -818,6 +885,17 @@ def build_doc_html(doc: dict, part: str = "questions") -> str:
                 body = item.get("answer_html") or _paras(ans, True)
                 out.append(f'<div class="ansblock">{lead}{body}{aimg}</div>')
         out.append("</div>")
+
+    if part == "all":
+        out.append('<div class="pagebreak"></div>')
+        out.append('<h1 class="title">参考答案与解析</h1>')
+        answer_bits = ""
+        for idx, item in enumerate(items, 1):
+            answer_bits += _answer_item_html(item, idx, items, total, tpl, ctx)
+        if answer_bits.strip():
+            out.append(answer_bits)
+        else:
+            out.append('<p class="body">（本卷暂无参考答案）</p>')
 
     if refs:
         out.append('<div class="refs"><h2>参考文献</h2>')

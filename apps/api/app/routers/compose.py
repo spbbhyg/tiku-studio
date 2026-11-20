@@ -239,31 +239,50 @@ def _docx(doc: dict, o: ComposeIn) -> bytes:
     from docx.shared import Cm, Pt
 
     def ea(run, name="宋体"):
-        run.font.name = name
+        # Web 端是 Times New Roman + 宋体；Word 里中英文字体必须分开设，不然英文会变成宋体
+        run.font.name = "Times New Roman"
         rpr = run._element.get_or_add_rPr()
         rf = rpr.get_or_add_rFonts()
+        rf.set(qn("w:ascii"), "Times New Roman")
+        rf.set(qn("w:hAnsi"), "Times New Roman")
         rf.set(qn("w:eastAsia"), name)
 
     eo = _opts(o)
+    # #5c：Word 不再另取一套默认值，直接吃预览/PDF 同一份 template token。
+    tpl = doc.get("template") or {}
     try:
-        fs = float(eo.get("font_size") or 12)
+        fs = float(eo.get("font_size") or tpl.get("size") or 10.45)
     except (TypeError, ValueError):
-        fs = 10.5
+        fs = 10.45
     try:
-        lh = float(eo.get("line_height") or 1.5)
+        lh = float(eo.get("line_height") or 0)          # 显式倍数时优先
     except (TypeError, ValueError):
-        lh = 1.5
+        lh = 0
     try:
-        mlr = float(eo.get("margin_lr") or 2.0)
-        mtb = float(eo.get("margin_tb") or 1.8)
+        lh_pt = float(tpl.get("lineHeight") or 15.6)    # 没设倍数就用预览的固定行距
     except (TypeError, ValueError):
-        mlr, mtb = 2.0, 1.8
+        lh_pt = 15.6
+    def _pt2cm(v, default):
+        try:
+            return float(v) / 28.3464567
+        except (TypeError, ValueError):
+            return default
+    margin = tpl.get("margin") or {}
+    ml = _pt2cm(margin.get("left"), 3.18)
+    mr = _pt2cm(margin.get("right"), 2.82)
+    mt = _pt2cm(margin.get("top"), 2.56)
+    mb = _pt2cm(margin.get("bottom"), 2.89)
+    # 旧的 margin_lr / margin_tb 只有一个值：用户显式给了就左右/上下一起覆盖
+    if eo.get("margin_lr"):
+        ml = mr = float(eo["margin_lr"])
+    if eo.get("margin_tb"):
+        mt = mb = float(eo["margin_tb"])
 
     d = Document()
     normal = d.styles["Normal"]
-    normal.font.name = "宋体"
+    normal.font.name = "Times New Roman"
     normal.font.size = Pt(fs)
-    normal.paragraph_format.line_spacing = lh
+    normal.paragraph_format.line_spacing = lh if lh else Pt(lh_pt)
     try:
         rf0 = normal.element.get_or_add_rPr().get_or_add_rFonts()
         rf0.set(qn("w:eastAsia"), "宋体")
@@ -272,9 +291,9 @@ def _docx(doc: dict, o: ComposeIn) -> bytes:
 
     sec = d.sections[0]
     sec.page_width, sec.page_height = Cm(21.0), Cm(29.7)
-    sec.left_margin = sec.right_margin = Cm(mlr)
-    sec.top_margin = sec.bottom_margin = Cm(mtb)
-    body_w = Cm(21.0 - 2 * mlr)
+    sec.left_margin, sec.right_margin = Cm(ml), Cm(mr)
+    sec.top_margin, sec.bottom_margin = Cm(mt), Cm(mb)
+    body_w = Cm(21.0 - ml - mr)
 
     # 页脚：自动页码（{page}/{pages}）
     fmt = _footer(o)
@@ -296,10 +315,11 @@ def _docx(doc: dict, o: ComposeIn) -> bytes:
             r.font.size = Pt(9)
             ea(r)
 
-    def para(text="", size=10.5, bold=False, before=0, after=3, align=None, line=1.45):
+    def para(text="", size=10.5, bold=False, before=0, after=3, align=None, line=None):
         p = d.add_paragraph()
         pf = p.paragraph_format
-        pf.space_before, pf.space_after, pf.line_spacing = Pt(before), Pt(after), line
+        pf.space_before, pf.space_after = Pt(before), Pt(after)
+        pf.line_spacing = line if line else (lh if lh else Pt(lh_pt))
         if align is not None:
             p.alignment = align
         if text:
@@ -318,36 +338,66 @@ def _docx(doc: dict, o: ComposeIn) -> bytes:
     if sub:
         para(sub, size=10.5, after=10, align=WD_ALIGN_PARAGRAPH.CENTER)
 
-    def add_img(path_w: dict, maxw=body_w):
-        url = str(path_w.get("path") or "")
-        if not url.startswith("http"):
-            return
-        try:
-            blob = httpx.get(url, timeout=20).content
-        except Exception:  # noqa: BLE001
-            return
-        try:
-            from PIL import Image
-            with Image.open(io.BytesIO(blob)) as im:
-                ratio = im.width / max(1, im.height)
-                # python-docx 只认 png/jpeg，题库里是 webp：先转一遍
-                if im.format not in ("PNG", "JPEG"):
-                    buf2 = io.BytesIO()
-                    im.convert("RGB").save(buf2, "PNG")
-                    blob = buf2.getvalue()
-        except Exception as exc:  # noqa: BLE001
-            print(f"[compose] 图片处理失败 {url}: {exc}")
-            ratio = 1.6
-        w = maxw
-        width_pt = float(path_w.get("width") or 0)
-        if width_pt:
-            w = min(maxw, Pt(width_pt))
-        p = d.add_paragraph()
-        p.paragraph_format.space_after = Pt(4)
-        p.add_run().add_picture(io.BytesIO(blob), width=w)
-        cap = str(path_w.get("caption") or "").strip()
-        if cap:
-            cp = para(cap, size=8.5, after=6, align=WD_ALIGN_PARAGRAPH.CENTER)
+    GAP = Pt(12)
+
+    def add_images(imgs, maxw=body_w):
+        """#5b / #9：同一题的图「一行横排、等比缩放、不放大、整体居中」。
+
+        旧实现每张图单独开一段，所以预览里并排的图到了 Word 会竖着堆；
+        宽度又默认吃满版心（w = maxw），小图被拉大，观感尺寸不统一。
+        现在：宽度一律按 pt 算（CSS px → pt 按 96dpi 换算），只缩不放；
+        一行放不下再换行，行为与预览的自动换行一致。
+        """
+        rows, cur, cur_w = [], [], 0
+        caps = []
+        for im in imgs or []:
+            url = str(im.get("path") or "")
+            if not url.startswith("http"):
+                continue
+            try:
+                blob = httpx.get(url, timeout=20).content
+            except Exception as exc:  # noqa: BLE001
+                print(f"[compose] 取图失败 {url}: {exc}")
+                continue
+            px_w = 0
+            try:
+                from PIL import Image
+                with Image.open(io.BytesIO(blob)) as im_obj:
+                    px_w = im_obj.width
+                    # python-docx 只认 png/jpeg，题库里是 webp：先转一遍
+                    if im_obj.format not in ("PNG", "JPEG"):
+                        buf2 = io.BytesIO()
+                        im_obj.convert("RGB").save(buf2, "PNG")
+                        blob = buf2.getvalue()
+            except Exception as exc:  # noqa: BLE001
+                print(f"[compose] 图片处理失败 {url}: {exc}")
+            native = Pt((px_w or 640) * 72.0 / 96.0)
+            want = float(im.get("width") or 0)
+            w = min(maxw, Pt(want) if want else native)     # 只缩不放，杜绝小图被撑大
+            if cur and cur_w + w + GAP > maxw:              # 这一行放不下了，换行
+                rows.append(cur)
+                cur, cur_w = [], 0
+            cur.append((blob, w))
+            cur_w += w + GAP
+            cap = str(im.get("caption") or "").strip()
+            if cap:
+                caps.append(cap)
+        if cur:
+            rows.append(cur)
+        for row in rows:
+            p = d.add_paragraph()
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER       # #9 水平居中
+            pf = p.paragraph_format
+            pf.first_line_indent = Pt(0)
+            pf.space_before = Pt(3)
+            pf.space_after = Pt(2)
+            for i, (blob, w) in enumerate(row):
+                r = p.add_run()
+                if i:
+                    r.add_text("　")                       # 图与图之间留一个字，避免贴死
+                r.add_picture(io.BytesIO(blob), width=w)   # 行内图 → 同一行横排
+        if caps:
+            para("　".join(caps), size=6.96, after=6, align=WD_ALIGN_PARAGRAPH.CENTER)
 
     cn_no = str(eo.get("numbering") or "arabic") == "cn"
     show_scores = bool(o.scores) and bool(eo.get("scores", True))
@@ -367,18 +417,33 @@ def _docx(doc: dict, o: ComposeIn) -> bytes:
         para(head, size=fs + 0.5, bold=True, before=6, after=3)
 
         body = rich_text.to_blocks(it.get("intro_html") or "") or _plain_blocks(it.get("intro"))
-        rich_text.docx_add(d, body, fs, line_spacing=lh)
-        for im in (it.get("images") or []):
-            add_img(im)
+        rich_text.docx_add(d, body, fs, line_spacing=(lh if lh else Pt(lh_pt)))
+        add_images(it.get("images") or [])
 
         for sub in (it.get("subs") or []):
             sblocks = rich_text.to_blocks(sub.get("stem_html") or "") or _plain_blocks(sub.get("stem"))
             if not sblocks:
                 continue
-            rich_text.docx_add(d, sblocks, fs, indent_cm=0.4, line_spacing=lh)
+            rich_text.docx_add(d, sblocks, fs, indent_cm=0.4, line_spacing=(lh if lh else Pt(lh_pt)))
 
-        if o.answers:
+    # #5a：Word 与预览/PDF 同规则——题目卷排完，答案另起一页，编号与题目一一对应
+    if o.answers:
+        d.add_page_break()
+        ap = para("参考答案与解析", size=fs + 2, bold=True, after=8, align=WD_ALIGN_PARAGRAPH.CENTER)
+        ap.runs[0].font.name = "宋体"
+        ea(ap.runs[0], "宋体")
+        for it in doc["items"]:
+            no = it.get("number")
+            head = (f"第{cn_num(int(no or 1))}题　" if cn_no else f"{no}. ") + (it.get("title") or "")
+            para(head, size=fs + 0.5, bold=True, before=6, after=3)
             abody = rich_text.to_blocks(it.get("answer_html") or "") or _plain_blocks(it.get("answer"))
+            sub_answers = []
+            for sub in (it.get("subs") or []):
+                sblocks = rich_text.to_blocks(sub.get("answer_html") or "") or _plain_blocks(sub.get("answer"))
+                if sblocks:
+                    sub_answers.append(sblocks)
+            if not abody and not sub_answers:
+                continue
             if abody:
                 first = abody[0]
                 if first["kind"] == "p" and first["runs"]:
@@ -387,7 +452,9 @@ def _docx(doc: dict, o: ComposeIn) -> bytes:
                 else:
                     abody.insert(0, {"kind": "p", "runs": [{"t": "【答案】", "sub": False,
                                                             "sup": False, "b": True, "i": False}]})
-                rich_text.docx_add(d, abody, fs, line_spacing=lh)
+                rich_text.docx_add(d, abody, fs, line_spacing=(lh if lh else Pt(lh_pt)))
+            for sblocks in sub_answers:
+                rich_text.docx_add(d, sblocks, fs, indent_cm=0.4, line_spacing=(lh if lh else Pt(lh_pt)))
 
     buf = io.BytesIO()
     d.save(buf)

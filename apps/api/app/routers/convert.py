@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import html as html_mod
 import io
+import logging
 import os
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
@@ -23,6 +26,44 @@ from starlette.concurrency import run_in_threadpool
 router = APIRouter(prefix="/api/convert", tags=["convert"])
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+# WPS/Word 的 COM、LibreOffice 的用户配置目录都是「全局独占」的：
+# 两个人同时点转换会互相抢锁，表现为「随机失败」。这里串行化重引擎，轻引擎不受影响。
+_CONV_LOCK = threading.Lock()
+_TIMEOUT = int(os.environ.get("TIKU_CONVERT_TIMEOUT", "180") or 180)
+
+_log = logging.getLogger("tiku.convert")
+
+
+class ConvertError(RuntimeError):
+    """带错误码的转换失败：前端拿到的是中文原因 + 可搜的码，不是一段英文堆栈。"""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _pymupdf():
+    """统一拿 PyMuPDF：新版叫 pymupdf，老版本只有 fitz。两边都得能用。"""
+    try:
+        import pymupdf  # type: ignore
+        return pymupdf
+    except ImportError:
+        pass
+    try:
+        import fitz as pymupdf  # type: ignore
+        return pymupdf
+    except ImportError as exc:
+        raise ConvertError("E_NO_PYMUPDF", "缺少 PDF 处理组件（PyMuPDF），重装一下软件就好") from exc
+
+
+def _dump_name(name: str) -> str:
+    return Path(name or "file").name[:60]
+
+
+def _log_fail(where: str, name: str, exc: BaseException) -> None:
+    _log.warning("[%s] %s 失败：%s: %s", where, _dump_name(name), type(exc).__name__, exc)
 
 
 # ------------------------------------------------------------------ 引擎探测
@@ -98,19 +139,24 @@ def get_engines():
 def _docx_to_pdf_soffice(blob: bytes) -> bytes:
     exe = _soffice()
     if not exe:
-        raise RuntimeError("no soffice")
+        raise ConvertError("E_NO_SOFFICE", "没找到 LibreOffice")
     with tempfile.TemporaryDirectory(prefix="tiku-conv-") as td:
         src = Path(td) / "in.docx"
         src.write_bytes(blob)
         env = dict(os.environ)
         env["HOME"] = td  # 让 soffice 用临时配置目录，避免和已开的 LibreOffice 抢锁
-        proc = subprocess.run(
-            [exe, "--headless", "--norestore", "--convert-to", "pdf", "--outdir", td, str(src)],
-            capture_output=True, timeout=180, env=env,
-        )
+        env["TMPDIR"] = td
+        try:
+            proc = subprocess.run(
+                [exe, "--headless", "--norestore", "--convert-to", "pdf", "--outdir", td, str(src)],
+                capture_output=True, timeout=_TIMEOUT, env=env,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ConvertError("E_TIMEOUT", f"LibreOffice 超过 {_TIMEOUT} 秒没转完，可能是文档太大或卡住了") from exc
         out = Path(td) / "in.pdf"
         if not out.exists():
-            raise RuntimeError((proc.stderr or b"").decode("utf-8", "ignore")[:300] or "LibreOffice 没产出 PDF")
+            err = (proc.stderr or b"").decode("utf-8", "ignore")[:300]
+            raise ConvertError("E_SOFFICE_FAIL", err or "LibreOffice 没产出 PDF（文件可能已损坏）")
         return out.read_bytes()
 
 
@@ -231,18 +277,41 @@ sub, sup {{ font-size: 70%; }}
 
 
 def _html_to_pdf(html_doc: str) -> bytes:
-    from playwright.sync_api import sync_playwright
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise ConvertError("E_NO_CHROMIUM", "缺少内置渲染组件（playwright），只能装 WPS 或用 LibreOffice") from exc
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(args=["--no-sandbox"])
-        try:
-            pg = browser.new_page()
-            pg.set_content(html_doc, wait_until="load")
-            pg.wait_for_timeout(300)
-            return pg.pdf(format="A4", print_background=True,
-                          margin={"top": "18mm", "bottom": "18mm", "left": "18mm", "right": "18mm"})
-        finally:
-            browser.close()
+    # 便携包把浏览器放在 runtime/ms-playwright，打包环境里必须显式指过去，
+    # 否则 playwright 会去 %LOCALAPPDATA% 找，报 "Executable doesn't exist"。
+    if not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
+        for guess in (
+            Path(os.environ.get("TIKU_ROOT", "")) / "runtime" / "ms-playwright",
+            Path(__file__).resolve().parents[3] / "runtime" / "ms-playwright",
+        ):
+            if guess.is_dir():
+                os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(guess)
+                break
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(args=["--no-sandbox"])
+            try:
+                pg = browser.new_page()
+                pg.set_content(html_doc, wait_until="load")
+                pg.wait_for_timeout(300)
+                return pg.pdf(format="A4", print_background=True,
+                              margin={"top": "18mm", "bottom": "18mm", "left": "18mm", "right": "18mm"})
+            finally:
+                browser.close()
+    except ConvertError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc)
+        if "Executable doesn't exist" in msg or "playwright install" in msg:
+            raise ConvertError("E_NO_CHROMIUM",
+                               "内置浏览器没装好（便携包缺 runtime/ms-playwright），重装软件或改用 WPS 转换") from exc
+        raise ConvertError("E_CHROMIUM_FAIL", f"内置渲染失败：{msg[:200]}") from exc
 
 
 _WPS_PS = r"""
@@ -271,41 +340,70 @@ try { $app.Quit() } catch {}
 
 
 def _docx_to_pdf_office(blob: bytes) -> bytes:
-    """用本机的 WPS / Office 转 PDF：版式和原文件几乎一致（本机装了 WPS 就能用）。"""
+    """用本机的 WPS / Office 转 PDF：版式和原文件几乎一致（本机装了 WPS 就能用）。
+
+    COM 是全局单例：两个请求同时进来，第二个 New-Object 会挂起或直接报错，
+    这就是用户说的「有时能转、有时转不了」。所以整段加锁串行。
+    """
     import subprocess
     import tempfile
 
-    with tempfile.TemporaryDirectory(prefix="docx2pdf-") as td:
-        src = Path(td) / "in.docx"
-        dst = Path(td) / "out.pdf"
-        src.write_bytes(blob)
-        script = Path(td) / "conv.ps1"
-        script.write_text(_WPS_PS, encoding="utf-8-sig")
-        env = dict(os.environ)
-        env["SF_SRC"] = str(src)
-        env["SF_DST"] = str(dst)
-        proc = subprocess.run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
-            capture_output=True, timeout=180, env=env,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        out = (proc.stdout or b"").decode("utf-8", "replace").strip()
-        if not dst.exists() or dst.stat().st_size < 1000:
-            raise RuntimeError(out or "Office 转换没有产物")
-        return dst.read_bytes()
+    if not _CONV_LOCK.acquire(timeout=_TIMEOUT):
+        raise ConvertError("E_BUSY", "转换任务排队超时（前面的文档还没转完），稍等一下再试")
+    try:
+        with tempfile.TemporaryDirectory(prefix="docx2pdf-") as td:
+            src = Path(td) / "in.docx"
+            dst = Path(td) / "out.pdf"
+            src.write_bytes(blob)
+            script = Path(td) / "conv.ps1"
+            script.write_text(_WPS_PS, encoding="utf-8-sig")
+            env = dict(os.environ)
+            env["SF_SRC"] = str(src)
+            env["SF_DST"] = str(dst)
+            try:
+                proc = subprocess.run(
+                    ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+                    capture_output=True, timeout=_TIMEOUT, env=env,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise ConvertError("E_TIMEOUT",
+                                   f"WPS/Office 超过 {_TIMEOUT} 秒没转完（可能弹了对话框没关），先手动打开 WPS 看有没有提示") from exc
+            out = (proc.stdout or b"").decode("utf-8", "replace").strip()
+            if "NOAPP" in out:
+                raise ConvertError("E_NO_OFFICE", "本机没装 WPS 或 Office")
+            if not dst.exists() or dst.stat().st_size < 1000:
+                raise ConvertError("E_OFFICE_FAIL", out or "Office 转换没有产物")
+            return dst.read_bytes()
+    finally:
+        _CONV_LOCK.release()
 
 
 def docx_to_pdf(blob: bytes) -> tuple[bytes, str]:
+    """按 office → soffice → 内置 Chromium 依次降级；全挂时给一条能看懂的原因。"""
+    reasons: list[str] = []
     try:
         return _docx_to_pdf_office(blob), "office"
     except Exception as exc:  # noqa: BLE001 — 本机没装 WPS/Office 或转换失败
-        print(f"[convert] WPS/Office 转换不可用，降级：{exc}")
+        reasons.append(f"WPS/Office：{exc}")
+        _log_fail("docx2pdf/office", "in.docx", exc)
     if _soffice():
         try:
             return _docx_to_pdf_soffice(blob), "soffice"
         except Exception as exc:  # noqa: BLE001 — 降级到内置渲染
-            print(f"[convert] soffice 失败，改用内置渲染：{exc}")
-    return _html_to_pdf(_docx_to_html(blob)), "builtin-chromium"
+            reasons.append(f"LibreOffice：{exc}")
+            _log_fail("docx2pdf/soffice", "in.docx", exc)
+    else:
+        reasons.append("LibreOffice：未安装")
+    try:
+        return _html_to_pdf(_docx_to_html(blob)), "builtin-chromium"
+    except ConvertError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        reasons.append(f"内置渲染：{exc}")
+        _log_fail("docx2pdf/builtin", "in.docx", exc)
+    raise ConvertError("E_ALL_ENGINES", "三种转 PDF 的办法都没成功（" + "；".join(reasons)[:300]
+                       + "）。装个 WPS 再试，或者把这个文件发给我看看")
 
 
 # ------------------------------------------------------------------ pdf → docx
@@ -382,16 +480,19 @@ def _figure_bands(page, col_rects: list) -> list:
 
 
 def pdf_to_docx(blob: bytes) -> tuple[bytes, str]:
-    try:
-        import pymupdf  # type: ignore
-    except ImportError:  # 老版本只有 fitz
-        import fitz as pymupdf  # type: ignore
+    pymupdf = _pymupdf()
 
     from docx import Document
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.shared import Cm, Pt
 
-    src = pymupdf.open(stream=blob, filetype="pdf")
+    try:
+        src = pymupdf.open(stream=blob, filetype="pdf")
+    except Exception as exc:  # noqa: BLE001
+        raise ConvertError("E_PDF_BROKEN", "这个 PDF 打不开（文件损坏或不是真正的 PDF）") from exc
+    if src.needs_pass:
+        src.close()
+        raise ConvertError("E_PDF_ENCRYPTED", "这个 PDF 加了密码，先去掉密码再转")
     d = Document()
     st = d.styles["Normal"]
     st.font.name = "宋体"
@@ -520,6 +621,47 @@ async def _read(file: UploadFile) -> bytes:
     return blob
 
 
+def _fail(what: str, exc: BaseException) -> HTTPException:
+    """失败统一走这里：中文原因 + 错误码，英文堆栈只进日志，不回显到界面。"""
+    if isinstance(exc, ConvertError):
+        _log.warning("[%s] %s［%s］", what, exc.message, exc.code)
+        code = 400 if exc.code in ("E_PDF_ENCRYPTED", "E_PDF_BROKEN", "E_PDF_EMPTY", "E_BUSY",
+                                   "E_NO_OFFICE", "E_NO_SOFFICE", "E_NO_CHROMIUM",
+                                   "E_NO_PYMUPDF", "E_USER_INPUT") else 500
+        return HTTPException(code, f"{what}失败：{exc.message}［{exc.code}］")
+    _log.exception("[%s] 未预期的异常", what)
+    return HTTPException(500, f"{what}失败：出了点意外（{type(exc).__name__}），"
+                              f"日志在 data/logs/app.log［E_UNKNOWN］")
+
+
+@router.get("/diagnose")
+def diagnose():
+    """一条命令看清「为什么转不了」：引擎在不在、临时目录能不能写、内置浏览器有没有。"""
+    import tempfile as _tf
+    out: dict = {"engines": engines(), "timeout": _TIMEOUT}
+    try:
+        with _tf.TemporaryDirectory(prefix="tiku-diag-") as td:
+            p = Path(td) / "w.txt"
+            p.write_text("ok", encoding="utf-8")
+            out["temp_writable"] = p.read_text(encoding="utf-8") == "ok"
+            out["temp_dir"] = td
+    except Exception as exc:  # noqa: BLE001
+        out["temp_writable"] = False
+        out["temp_error"] = str(exc)
+    try:
+        root = Path(os.environ.get("TIKU_ROOT") or Path(__file__).resolve().parents[3])
+        ms = root / "runtime" / "ms-playwright"
+        out["playwright_browsers"] = str(ms) if ms.is_dir() else ""
+        out["office_exe"] = _soffice() or ""
+    except Exception:  # noqa: BLE001
+        pass
+    have = [k for k in ("office", "soffice", "chromium") if out["engines"].get(k)]
+    out["docx2pdf_ok"] = bool(have)
+    out["hint"] = ("可以转：将按 " + " → ".join(have) + " 的顺序尝试") if have else \
+        "三种引擎都没有：装个 WPS 就能转（或装 LibreOffice），否则只能做 PDF 拆分/合并"
+    return out
+
+
 @router.post("/docx2pdf")
 async def api_docx2pdf(file: UploadFile = File(...)):
     blob = await _read(file)
@@ -529,7 +671,7 @@ async def api_docx2pdf(file: UploadFile = File(...)):
         # playwright 的同步 API 不能在事件循环里跑，扔到线程池
         out, engine = await run_in_threadpool(docx_to_pdf, blob)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(500, f"转 PDF 失败：{exc or type(exc).__name__}") from exc
+        raise _fail("转 PDF ", exc) from exc
     return Response(out, media_type="application/pdf", headers={
         "Content-Disposition": f"attachment; filename*=UTF-8''{_stem(file.filename)}.pdf",
         "X-Engine": engine,
@@ -544,7 +686,7 @@ async def api_pdf2docx(file: UploadFile = File(...)):
     try:
         out, engine = await run_in_threadpool(pdf_to_docx, blob)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(500, f"转 Word 失败：{exc or type(exc).__name__}") from exc
+        raise _fail("转 Word ", exc) from exc
     return Response(out, media_type=DOCX_MIME, headers={
         "Content-Disposition": f"attachment; filename*=UTF-8''{_stem(file.filename)}.docx",
         "X-Engine": engine,
@@ -590,7 +732,7 @@ def _pdf_split_pypdf(blob: bytes, pages: list[int]) -> bytes:
 
 
 def _pdf_split_pymupdf(blob: bytes, pages: list[int]) -> bytes:
-    import pymupdf
+    pymupdf = _pymupdf()
 
     src = pymupdf.open(stream=blob, filetype="pdf")
     out = pymupdf.open()
@@ -602,13 +744,33 @@ def _pdf_split_pymupdf(blob: bytes, pages: list[int]) -> bytes:
     return data
 
 
+def _pdf_page_count(blob: bytes) -> int:
+    """pypdf 和 pymupdf 谁有就用谁：只装了其中一个的环境也得能拆/合。"""
+    try:
+        from pypdf import PdfReader
+
+        return len(PdfReader(io.BytesIO(blob)).pages)
+    except ImportError:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        raise ConvertError("E_PDF_BROKEN", "这个 PDF 打不开（文件损坏或加了密码）") from exc
+    pymupdf = _pymupdf()
+    try:
+        doc = pymupdf.open(stream=blob, filetype="pdf")
+        n = doc.page_count
+        doc.close()
+        return n
+    except Exception as exc:  # noqa: BLE001
+        raise ConvertError("E_PDF_BROKEN", "这个 PDF 打不开（文件损坏或加了密码）") from exc
+
+
 def pdf_split(blob: bytes, spec: str) -> tuple[bytes, str, int]:
     """按页码范围拆成多个 PDF，打包成 ZIP 返回。spec='each' 表示一页一个。"""
     import zipfile
 
-    from pypdf import PdfReader
-
-    total = len(PdfReader(io.BytesIO(blob)).pages)
+    total = _pdf_page_count(blob)
+    if total <= 0:
+        raise ConvertError("E_PDF_EMPTY", "这个 PDF 一页都没有")
     spec = str(spec or "").strip()
     groups: list[tuple[int, list[int]]] = []
     if spec.lower() in ("each", "逐页", "每页"):
@@ -633,8 +795,6 @@ def pdf_split(blob: bytes, spec: str) -> tuple[bytes, str, int]:
 
 
 def pdf_merge(blobs: list[bytes]) -> tuple[bytes, str]:
-    import pymupdf
-
     try:
         from pypdf import PdfReader, PdfWriter
 
@@ -646,6 +806,7 @@ def pdf_merge(blobs: list[bytes]) -> tuple[bytes, str]:
         writer.write(buf)
         return buf.getvalue(), "pypdf"
     except Exception:  # noqa: BLE001
+        pymupdf = _pymupdf()
         out = pymupdf.open()
         for blob in blobs:
             src = pymupdf.open(stream=blob, filetype="pdf")
@@ -666,7 +827,7 @@ def _is_cjk(ch: str) -> bool:
 def _ocr_page_lines(page) -> list[str]:
     """OCR 一页，按行合并成自然段（坐标是 0..1 的归一化值）。"""
     import numpy as np
-    import pymupdf
+    pymupdf = _pymupdf()
 
     pix = page.get_pixmap(matrix=pymupdf.Matrix(2.2, 2.2), alpha=False)
     try:
@@ -709,7 +870,7 @@ def _ocr_page_lines(page) -> list[str]:
 
 def pdf_ocr_docx(blob: bytes, max_pages: int = 40) -> tuple[bytes, str]:
     """扫描版 PDF：逐页 OCR 认字排成 Word；认不出的页整页贴图，内容不丢。"""
-    import pymupdf
+    pymupdf = _pymupdf()
     from docx import Document
     from docx.oxml.ns import qn
     from docx.shared import Cm, Pt
@@ -775,7 +936,7 @@ async def api_pdf_split(file: UploadFile = File(...), pages: str = ""):
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(500, f"拆分失败：{exc or type(exc).__name__}") from exc
+        raise _fail("拆分 PDF ", exc) from exc
     return Response(data, media_type="application/zip", headers={
         "Content-Disposition": f"attachment; filename*=UTF-8''{_stem(file.filename)}-split.zip",
         "X-Engine": engine,
@@ -796,7 +957,7 @@ async def api_pdf_merge(files: list[UploadFile] = File(...)):
     try:
         data, engine = await run_in_threadpool(pdf_merge, blobs)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(500, f"合并失败：{exc or type(exc).__name__}") from exc
+        raise _fail("合并 PDF ", exc) from exc
     return Response(data, media_type="application/pdf", headers={
         "Content-Disposition": "attachment; filename*=UTF-8''merged.pdf",
         "X-Engine": engine,
@@ -811,7 +972,7 @@ async def api_pdf2docx_ocr(file: UploadFile = File(...)):
     try:
         out, engine = await run_in_threadpool(pdf_ocr_docx, blob)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(500, f"扫描件转 Word 失败：{exc or type(exc).__name__}") from exc
+        raise _fail("扫描件转 Word ", exc) from exc
     return Response(out, media_type=DOCX_MIME, headers={
         "Content-Disposition": f"attachment; filename*=UTF-8''{_stem(file.filename)}.docx",
         "X-Engine": engine,
