@@ -41,7 +41,71 @@ echo 正在启动神奋（第一次会慢一点，浏览器稍后自己会打开
 start "" tiku-studio.exe
 """
 
-README = """神奋  题库 · 对纲 · 组卷（0.6.1 · 第五版）
+
+UNINSTALL_CMD = r"""@echo off
+chcp 65001 >nul
+setlocal enabledelayedexpansion
+title 卸载神奋
+cd /d "%~dp0"
+echo.
+echo   卸载神奋（程序文件会删掉，你的题目和文档可以留着）
+echo   --------------------------------------------
+echo   安装位置：%~dp0
+echo.
+set "DELDATA=n"
+set /p "DELDATA=  连 data 里的题库/文档/图片一起删吗？（默认不删，直接回车；要全删输 y）: "
+if /i "!DELDATA!"=="y" set "DELDATA=y" else set "DELDATA=n"
+
+echo   正在结束正在运行的神奋...
+taskkill /f /im tiku-studio.exe >nul 2>&1
+taskkill /f /im node.exe >nul 2>&1
+taskkill /f /im chemy.exe >nul 2>&1
+timeout /t 2 >nul
+
+echo   正在删注册表卸载项...
+reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\神奋" /f >nul 2>&1
+
+echo   正在删桌面快捷方式...
+del /f /q "%USERPROFILE%\Desktop\神奋.lnk" >nul 2>&1
+
+set "HERE=%~dp0"
+if /i "!DELDATA!"=="y" goto :full
+
+echo   正在删程序文件（保留 data）...
+for /d %%D in ("%HERE%*") do (
+  if /i not "%%~nxD"=="data" rd /s /q "%%D" >nul 2>&1
+)
+for %%F in ("%HERE%*.exe" "%HERE%*.dll" "%HERE%*.cmd" "%HERE%*.txt" "%HERE%*.json") do (
+  del /f /q "%%F" >nul 2>&1
+)
+del /f /q "%~f0" >nul 2>&1
+echo.
+echo   卸载完成：程序删了，data 留着（想彻底清干净就手动删掉这个文件夹）。
+echo.
+pause
+exit /b 0
+
+:full
+echo   正在删全部文件（含 data）...
+cd /d "%HERE%.."
+rd /s /q "%HERE%" >nul 2>&1
+echo.
+echo   卸载完成：整个目录都删了。
+pause
+exit /b 0
+"""
+
+REG_CMD = r"""@echo off
+rem 由安装脚本调用：写“应用和功能”里的卸载项
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\神奋" /v DisplayName /t REG_SZ /d "神奋（题库 · 对纲 · 组卷）" /f >nul
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\神奋" /v DisplayVersion /t REG_SZ /d "{ver}" /f >nul
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\神奋" /v InstallLocation /t REG_SZ /d "{dir}" /f >nul
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\神奋" /v DisplayIcon /t REG_SZ /d "{dir}\tiku-studio.exe,0" /f >nul
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\神奋" /v UninstallString /t REG_SZ /d "\"{dir}\卸载-神奋.cmd\"" /f >nul
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\神奋" /v Publisher /t REG_SZ /d "神奋" /f >nul
+"""
+
+README = """神奋  题库 · 对纲 · 组卷（0.6.2 · 第五版）
 =====================================
 
 怎么用
@@ -100,6 +164,11 @@ README = """神奋  题库 · 对纲 · 组卷（0.6.1 · 第五版）
 
 卸载
   删掉这个目录就行，不写注册表。数据在 data\ 里，想留就先拷出来。
+
+八、不想要了怎么卸
+  安装目录里双击「卸载-神奋.cmd」（也可以在 Windows「应用和功能」里找「神奋」）。
+  卸载会结束正在跑的进程、删桌面快捷方式、清注册表；默认保留 data（题库/文档/图片都在），
+  卸载时输入 y 才会把 data 一起删掉。
 """
 
 
@@ -148,6 +217,13 @@ def build_tree() -> Path:
 
     step("写启动脚本与说明")
     (OUT / "启动-神奋.cmd").write_text(START_CMD, encoding="utf-8")
+    (OUT / "卸载-神奋.cmd").write_text(UNINSTALL_CMD, encoding="utf-8")
+    try:
+        from ..apps.api.app.config import VERSION as _V  # type: ignore  # noqa: F401
+    except Exception:  # noqa: BLE001
+        _V = "0.6.2"
+    (OUT / "写注册表.cmd").write_text(
+        REG_CMD.replace("{ver}", str(_V)).replace("{dir}", str(OUT)), encoding="utf-8")
     (OUT / "使用说明.txt").write_text(README, encoding="utf-8")
     return OUT
 

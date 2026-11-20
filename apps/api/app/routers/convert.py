@@ -469,39 +469,80 @@ def _merge_para(texts: list[str]) -> str:
 
 
 def _figure_bands(page, col_rects: list) -> list:
-    """在一列里找「没有文字、却有画的」竖直区间，当作插图区（整幅方案图也能整块框住）。"""
-    try:
-        drawings = [dr["rect"] for dr in page.get_drawings() if dr.get("rect")]
-    except Exception:  # noqa: BLE001
-        return []
-    if not drawings:
-        return []
+    """在一列里找「没有文字、却有画」的竖直区间，当作插图区（整幅方案图也能整块框住）。
+
+    0.6.2：图片型 PDF（截图、扫描件、Word 贴图）里没有矢量 drawing，
+    只认 get_drawings 会一个图区都框不到 → 图全丢。这里把位图 bbox 也算进来。
+    """
     rects = sorted(col_rects, key=lambda r: r.y0)
     if not rects:
         return []
     x0 = min(r.x0 for r in rects)
     x1 = max(r.x1 for r in rects)
+
+    marks = []          # 所有“画”的外框：矢量 + 位图
+    try:
+        marks += [dr["rect"] for dr in page.get_drawings() if dr.get("rect")]
+    except Exception:   # noqa: BLE001
+        pass
+    try:
+        import pymupdf as fitz
+
+        for info in page.get_image_info(xrefs=True):
+            bb = info.get("bbox")
+            if not bb:
+                continue
+            r = fitz.Rect(bb)
+            # 太小的当图标/点阵装饰，别单独当插图
+            if r.width < 40 or r.height < 40:
+                continue
+            marks.append(r)
+    except Exception:   # noqa: BLE001
+        pass
+
+    if not marks:
+        return []
+
     bands = []
     cur = min(r.y0 for r in rects) - 4
     for r in rects:
         gap = r.y0 - cur
         if gap > 30:
             band = (cur, r.y0)
-            hit = [d for d in drawings
+            hit = [d for d in marks
                    if d.y0 < band[1] - 4 and d.y1 > band[0] + 4 and d.x0 < x1 and d.x1 > x0]
             if hit:
                 yy0 = min([band[0]] + [d.y0 for d in hit])
                 yy1 = max([band[1]] + [d.y1 for d in hit])
                 if yy1 - yy0 > 50:
-                    bands.append((x0, yy0, x1, yy1))
+                    # 横向范围取“画”的并集：位图往往比文字栏宽得多，
+                    # 用文字栏的 x 范围会把图裁成一条缝（0.6.2 修复）
+                    bx0 = max(page.rect.x0, min(d.x0 for d in hit))
+                    bx1 = min(page.rect.x1, max(d.x1 for d in hit))
+                    if bx1 - bx0 < 40:
+                        bx0, bx1 = x0, max(x1, max(d.x1 for d in hit))
+                    bands.append((bx0, yy0, bx1, yy1))
         cur = max(cur, r.y1)
-    tail = (cur, max(cur + 4, max(d.y1 for d in drawings) if drawings else cur + 4))
+
+    # 末尾（最后一行文字之后）也可能整块是图
+    tail_y1 = max([max(d.y1 for d in marks), cur + 4])
+    tail = (cur, tail_y1)
     if tail[1] - tail[0] > 50:
-        hit = [d for d in drawings if d.y0 < tail[1] and d.y1 > tail[0] and d.x0 < x1 and d.x1 > x0]
+        hit = [d for d in marks if d.y0 < tail[1] and d.y1 > tail[0] and d.x0 < x1 and d.x1 > x0]
         if hit:
-            bands.append((x0, min([tail[0]] + [d.y0 for d in hit]),
-                          x1, max([tail[1]] + [d.y1 for d in hit])))
-    return bands
+            bx0 = max(page.rect.x0, min(d.x0 for d in hit))
+            bx1 = min(page.rect.x1, max(d.x1 for d in hit))
+            if bx1 - bx0 < 40:
+                bx0, bx1 = x0, max(x1, max(d.x1 for d in hit))
+            bands.append((bx0, min([tail[0]] + [d.y0 for d in hit]),
+                          bx1, max([tail[1]] + [d.y1 for d in hit])))
+
+    # 去重（有重叠只留大的）
+    out = []
+    for b in sorted(bands, key=lambda b: (b[1], b[3] - b[1])):
+        if not any(abs(b[1] - o[1]) < 8 and abs(b[3] - o[3]) < 8 for o in out):
+            out.append(b)
+    return out
 
 
 def pdf_to_docx(blob: bytes) -> tuple[bytes, str]:

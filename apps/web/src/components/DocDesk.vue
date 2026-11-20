@@ -44,7 +44,15 @@ function endSplit() {
   window.removeEventListener('pointermove', onSplit)
   window.removeEventListener('pointerup', endSplit)
 }
-const docStyle = computed(() => ({ flex: `0 0 ${(ratio.value * 100).toFixed(2)}%` }))
+const RFOLD = 'tiku-desk-fold-r'
+const rf = ref(localStorage.getItem(RFOLD) === '1')
+function toggleCanvas() {
+  rf.value = !rf.value
+  localStorage.setItem(RFOLD, rf.value ? '1' : '0')
+}
+const docStyle = computed(() => (rf.value
+  ? { flex: '1 1 auto' }
+  : { flex: `0 0 ${(ratio.value * 100).toFixed(2)}%` }))
 
 // ---------- 文档 ----------
 const curName = ref('')
@@ -202,11 +210,9 @@ async function aiInsert() {
   <div class="desk">
     <div class="dtop">
       <button class="btn" title="新建一份空 Word 文档" @click="newDoc">新建文档</button>
-      <button class="btn" title="把电脑里的图片或 PDF 放进右边的画布" :disabled="importing" @click="pickCanvasFiles">
-        {{ importing ? '导入中…' : '导入图片 / PDF 进画布' }}
+      <button class="btn" :title="rf ? '把右边的画布展开' : '把右边的画布收起，文档占满'" @click="toggleCanvas">
+        {{ rf ? '显示画布' : '收起画布' }}
       </button>
-      <input ref="canvasFileEl" type="file" accept=".png,.jpg,.jpeg,.webp,image/*,application/pdf" multiple hidden
-             @change="onPickCanvasFiles" />
       <span class="sp" />
       <span v-if="dirty && saving" class="mut">正在自动保存…</span>
       <span v-else-if="savedAt" class="mut">已自动保存 {{ savedAt }}</span>
@@ -248,8 +254,8 @@ async function aiInsert() {
         <span></span>
       </div>
 
-      <section class="rpane">
-        <CanvasPane ref="paneRef" title="画布" :max-pages="1" to-doc
+      <section v-show="!rf" class="rpane">
+        <CanvasPane ref="paneRef" title="画布" :max-pages="1" to-doc image-only
                     hint="把图拖进来，或点「＋ 文本」；选中图可裁剪、可送进左边文档"
                     @toDoc="onToDoc" @files="onCanvasFiles" @changed="() => {}" />
       </section>

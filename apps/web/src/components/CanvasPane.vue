@@ -5,6 +5,7 @@ import { renderMath } from '../math.js'
 import { flowText } from '../textflow.js'
 
 const props = defineProps({
+  imageOnly: { type: Boolean, default: false },
   title: { type: String, default: '画布' },
   hint: { type: String, default: '把左侧裁好的图拖进来，或点「＋ 文本」开始排版' },
   maxPages: { type: Number, default: 1 },
@@ -1456,30 +1457,30 @@ import Icon from './Icon.vue'
 </script>
 
 <template>
-  <section class="cvpane" :class="{ collapsed }">
+  <section class="cvpane" :class="{ collapsed, imageonly: imageOnly }">
     <header class="cvhead">
       <b>{{ title }}</b>
       <span class="muted">{{ blocks.length }} 个元素 · {{ Math.round(pageHeight) }}pt</span>
       <span class="spacer"></span>
-      <label class="chk" v-if="!collapsed"><input type="checkbox" v-model="autoAlign" /> 自动对齐</label>
-      <span class="muted" v-if="!collapsed" style="margin-left:8px">字号</span>
-      <input v-if="!collapsed" v-model.number="fontTarget" type="number" min="6" max="24" step="0.5"
+      <label class="chk" v-if="!collapsed && !imageOnly"><input type="checkbox" v-model="autoAlign" /> 自动对齐</label>
+      <span class="muted" v-if="!collapsed && !imageOnly" style="margin-left:8px">字号</span>
+      <input v-if="!collapsed && !imageOnly" v-model.number="fontTarget" type="number" min="6" max="24" step="0.5"
              style="width:56px;padding:3px 6px" title="统一到多少 pt" />
-      <span class="muted" v-if="!collapsed" style="margin-left:8px">颜色</span>
-      <span class="swatches" v-if="!collapsed">
+      <span class="muted" v-if="!collapsed && !imageOnly" style="margin-left:8px">颜色</span>
+      <span class="swatches" v-if="!collapsed && !imageOnly">
         <button v-for="p in PRESET_COLORS" :key="p.c" class="sw" :class="{ on: textColor === p.c }"
                 :style="{ background: p.c }" :title="`${p.n}：先拖选文字，再点这里直接上色`"
                 @mousedown.prevent="pickColor(p.c)"></button>
       </span>
-      <input v-if="!collapsed" v-model="textColor" type="color" class="colorin" title="自定义颜色" @change="applyColor" />
-      <button class="ghost sm" v-if="!collapsed" @click="applyColor" title="给选中的文字块上色；选中图片则把它染成这个颜色；未选中时用于新插入的文字">上色</button>
-      <button class="ghost sm" v-if="!collapsed" @click="unifyFonts" title="按测得字号统一并左对齐">统一字号</button>
+      <input v-if="!collapsed && !imageOnly" v-model="textColor" type="color" class="colorin" title="自定义颜色" @change="applyColor" />
+      <button class="ghost sm" v-if="!collapsed && !imageOnly" @click="applyColor" title="给选中的文字块上色；选中图片则把它染成这个颜色；未选中时用于新插入的文字">上色</button>
+      <button class="ghost sm" v-if="!collapsed && !imageOnly" @click="unifyFonts" title="按测得字号统一并左对齐">统一字号</button>
       <button class="icon" :title="collapsed ? '展开' : '收起'" @click="collapsed = !collapsed">{{ collapsed ? '▾' : '▴' }}</button>
     </header>
     <div v-if="tip && !collapsed" class="cvhint">{{ tip }}</div>
 
     <div v-show="!collapsed" class="cvbody" @pointerdown="emit('activate')">
-      <div class="toolbar">
+      <div class="toolbar" v-if="!imageOnly">
         <div class="tgroup">
           <span class="lbl">字号</span>
           <button class="icon" title="缩小选中的文字 / 图片" @click="bumpSize(-1)">A－</button>
@@ -1754,4 +1755,10 @@ import Icon from './Icon.vue'
 .cropbar { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
 .cropbar .spacer { flex: 1; }
 .btxt { margin-left: 4px; font-size: 12px; }
+
+/* 文档模式：画布只做修图（隐藏文字/翻译/公式那排） */
+.cvpane.imageonly .txtools { display: none; }
+.cvpane.imageonly .cvhead .fontbox,
+.cvpane.imageonly .cvhead .swatches,
+.cvpane.imageonly .cvhead .colorin { display: none; }
 </style>

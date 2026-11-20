@@ -23,6 +23,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
 from ..config import DATA_DIR
+from ..services import omml as omml_mod
 
 router = APIRouter(prefix="/api/doce", tags=["doce"])
 
@@ -131,6 +132,34 @@ def delete_file(name: str) -> dict:
     if p.exists():
         p.unlink()
     return {"ok": True}
+
+
+class FormulaIn(BaseModel):
+    tex: str = ""
+    display: bool = False
+
+
+@router.post("/formula-omml")
+def formula_omml(body: FormulaIn):
+    """LaTeX（化学常用子集）→ Word 原生公式 OMML。
+
+    前端拿到 omml 后走 SuperDoc 的 clipboard.insert({inlines:[{kind:'math', omml}]})，
+    插进去的是可编辑的真公式（不是图片），导出 docx 也是 Word 原生对象。
+    """
+    tex = (body.tex or "").strip()
+    if not tex:
+        raise HTTPException(400, "公式是空的：先写点什么，比如 H_2SO_4 或 \\ce{2H2 + O2 -> 2H2O}")
+    try:
+        xml = omml_mod.latex_to_omml(tex, display=bool(body.display))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"这个公式暂时看不懂：{exc}。可以把复杂的地方拆成两段，或者直接写文字。") from exc
+    return {
+        "ok": True,
+        "omml": xml,
+        "text": omml_mod.plain_text(tex),
+        "tex": tex,
+        "display": bool(body.display),
+    }
 
 
 @router.get("/status")

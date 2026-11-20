@@ -54,15 +54,21 @@ LIGHT_HINT = ("update", "patch", "增量")
 
 DEFAULT_MIRRORS = [
     {
-        "id": "tuna",
-        "name": "清华 TUNA",
-        "url": "https://mirrors.tuna.tsinghua.edu.cn/github-release/{owner}/{repo}/{tag}/{asset}",
+        "id": "ghfast",
+        "name": "ghfast 加速（首选）",
+        "url": "https://ghfast.top/https://github.com/{owner}/{repo}/releases/download/{tag}/{asset}",
         "probe": True,
     },
     {
-        "id": "ghproxy",
-        "name": "ghproxy 加速",
-        "url": "https://ghfast.top/https://github.com/{owner}/{repo}/releases/download/{tag}/{asset}",
+        "id": "gh-proxy",
+        "name": "gh-proxy 加速",
+        "url": "https://gh-proxy.com/https://github.com/{owner}/{repo}/releases/download/{tag}/{asset}",
+        "probe": True,
+    },
+    {
+        "id": "ghproxy-net",
+        "name": "ghproxy.net 加速",
+        "url": "https://ghproxy.net/https://github.com/{owner}/{repo}/releases/download/{tag}/{asset}",
         "probe": True,
     },
     {
@@ -70,6 +76,12 @@ DEFAULT_MIRRORS = [
         "name": "GitHub 直连",
         "url": "https://github.com/{owner}/{repo}/releases/download/{tag}/{asset}",
         "probe": False,
+    },
+    {
+        "id": "tuna",
+        "name": "清华 TUNA（只收录部分项目，可能 404）",
+        "url": "https://mirrors.tuna.tsinghua.edu.cn/github-release/{owner}/{repo}/{tag}/{asset}",
+        "probe": True,
     },
 ]
 
@@ -197,8 +209,9 @@ def _check_remote() -> dict:
                       headers={"Accept": "application/vnd.github+json",
                                "User-Agent": "shenfen-updater"})
     except Exception as exc:                            # noqa: BLE001
-        return {"ok": False, "code": "E_NET", "current": VERSION,
-                "error": f"连不上 GitHub：{exc}（检查网络/代理）"}
+        return {"ok": False, "code": "E_NET", "current": VERSION, "limited": True,
+                "error": "连不上 GitHub（多半是网络被限速或代理没开）。"
+                         "可以稍后再点，或者直接用桌面那个 780MB 的安装包手动更新。"}
     if r.status_code == 404:
         return {"ok": True, "current": VERSION, "latest": VERSION, "has_update": False,
                 "note": "仓库里还没有发布版本"}

@@ -138,7 +138,7 @@ def chat(db: Session, messages: list[dict], page: str = "", search: bool = False
         temperature=0.3,
         max_tokens=2600,
     )
-    return {"reply": content, "sources": sources, "search_error": search_error, "usage": usage}
+    return {"reply": content, "text": content, "content": content, "sources": sources, "search_error": search_error, "usage": usage}
 
 
 def stream_chat(db: Session, messages: list[dict], page: str = "", search: bool = False):

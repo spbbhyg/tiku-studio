@@ -1551,7 +1551,7 @@ onBeforeUnmount(() => {
 
   <div class="writer wps" :class="{ 'left-off': !qOpen, 'focus-mode': true }">
 
-    <div class="wtools">
+    <div class="wtools" v-if="editMode !== 'doc'">
       <button class="wt" :class="{ on: drawer === 'pdf' }" title="PDF 文献（导入 / 预览 / 拖入）" @click="toggleTool('pdf')"><Icon name="pdf" /></button>
       <button class="wt" :disabled="!activeDoc" title="放大并裁剪（框选题目或答案）" @click="openCrop"><Icon name="crop" /></button>
       <button class="wt" :class="{ on: drawer === 'formula' }" title="公式面板（上下标 / 分式 / 希腊字母）" @click="toggleTool('formula')"><Icon name="formula" /></button>

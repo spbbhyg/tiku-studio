@@ -480,21 +480,18 @@ def _crop_question_images(pdf_path: str, items: list[dict]) -> None:
 
 @router.get("/cleanup/scan")
 def cleanup_scan(db: Session = Depends(get_db)):
-    r = _scan_cleanup(db)
+    from ..services import cleanup as cleanup_mod
+
+    r = cleanup_mod.scan(db)
     return {"ok": True, **r["stats"]}
 
 
 @router.post("/cleanup")
 def cleanup_run(db: Session = Depends(get_db)):
-    r = _scan_cleanup(db)
-    removed = 0
-    for p in r["orphan_images"] + r["old_uploads"] + r["old_exports"]:
-        try:
-            p.unlink()
-            removed += 1
-        except OSError:
-            pass
-    return {"ok": True, "removed": removed, "freed_bytes": r["stats"]["total_bytes"]}
+    from ..services import cleanup as cleanup_mod
+
+    r = cleanup_mod.run(db)
+    return {"ok": True, **r}
 
 
 @router.post("/export-logs/delete")

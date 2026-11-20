@@ -59,14 +59,14 @@
           <button v-for="c in fxChips" :key="c.t" class="chip" @click="addChip(c)">{{ c.t }}</button>
         </div>
         <div class="prev">
-          <img v-if="fx.url" :src="fx.url" alt="公式预览" />
+          <div v-if="fx.mathml" class="mprev" v-html="fx.mathml" />
           <span v-else class="mut">{{ fx.busy ? '正在渲染…' : '点「预览」看效果' }}</span>
         </div>
         <div class="dfoot">
           <button class="btn" :disabled="fx.busy" @click="previewFormula">预览</button>
           <span class="grow" />
           <label class="ck"><input v-model="fx.display" type="checkbox" @change="previewFormula" /> 独立成行（大公式）</label>
-          <button class="btn primary" :disabled="!fx.data || fx.busy" @click="insertFormula">插到光标处</button>
+          <button class="btn primary" :disabled="!fx.omml || fx.busy" @click="insertFormula">插到光标处</button>
         </div>
       </div>
     </div>
@@ -111,7 +111,8 @@ const fileEl = ref(null)
 const imgEl = ref(null)
 const sd = shallowRef(null)
 
-const fx = reactive({ open: false, tex: '', display: false, url: '', data: '', w: 0, h: 0, busy: false })
+const fx = reactive({
+  omml: '', mathml: '', text: '', startOnly: false, open: false, tex: '', display: false, url: '', data: '', w: 0, h: 0, busy: false })
 const st = reactive({ open: false, busy: false })
 const stFrame = ref(null)
 
@@ -431,21 +432,68 @@ function addChip(c) {
 }
 
 async function previewFormula() {
-  if (!fx.tex.trim()) { fx.url = ''; fx.data = ''; return }
+  if (!fx.tex.trim()) { fx.url = ''; fx.omml = ''; return }
   fx.busy = true
   try {
-    const r = await api.post('/api/doce/formula', { tex: fx.tex, display: fx.display })
-    fx.url = r.url + '?t=' + Date.now()
-    fx.data = r.data
-    fx.w = r.width
-    fx.h = r.height
-  } catch (e) { fx.data = ''; fx.url = ''; fail(e) } finally { fx.busy = false }
+    const r = await api.post('/api/doce/formula-omml', { tex: fx.tex, display: fx.display })
+    fx.omml = r.omml
+    fx.text = r.text || ''
+    fx.mathml = ommlToMathml(r.omml)
+    fx.url = 'ok'
+  } catch (e) { fx.omml = ''; fx.mathml = ''; fx.url = ''; fail(e) } finally { fx.busy = false }
 }
 
 async function insertFormula() {
-  if (!fx.data) return
-  const ok = await insertPng(fx.data, fx.w, fx.h, '公式')
-  if (ok) { fx.open = false; say('公式已插到光标处') }
+  const omml = (fx.omml || '').trim()
+  if (!omml) return
+  try {
+    const ed = await whenReady()
+    const doc = ed && ed.doc
+    if (!doc || !doc.clipboard || !doc.clipboard.insert) throw new Error('编辑器还没准备好，稍等两秒再试')
+    const text = fx.text || ''
+    const inlines = []
+    if (text && !fx.startOnly) inlines.push({ kind: 'text', text })
+    inlines.push({ kind: 'math', omml })
+    const res = await doc.clipboard.insert({
+      fragment: {
+        kind: 'superdoc.clipboard.fragment',
+        version: 'v2.2',
+        blocks: [{ kind: 'paragraph', runs: [{ text: text }], inlines }],
+      },
+    })
+    if (res && res.success === false) throw new Error((res.failure && res.failure.message) || '插入失败')
+    fx.open = false
+    say('公式已插到光标处（Word 里可双击编辑）')
+    emit('changed')
+  } catch (e) { fail(e) }
+}
+
+/** OMML → MathML，只用于对话框里的小预览（浏览器能直接画）。 */
+function ommlToMathml(omml) {
+  const wrap = (inner) => '<math xmlns="http://www.w3.org/1998/Math/MathML">' + inner + '</math>'
+  const doc = new DOMParser().parseFromString(
+    '<root xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">' + omml + '</root>',
+    'application/xml')
+  const walk = (node) => {
+    const name = (node.localName || '').toLowerCase()
+    const kids = [...node.children].map(walk).join('')
+    switch (name) {
+      case 'omath': return wrap(kids)
+      case 'r': return '<mi>' + (node.textContent || '') + '</mi>'
+      case 't': return ''
+      case 'ssub': return '<msub>' + kids.replace('</mi>', '</mi>') + '</msub>'
+      case 'ssup': return '<msup>' + kids + '</msup>'
+      case 'ssubsup': return '<msubsup>' + kids + '</msubsup>'
+      case 'sub': case 'sup': case 'num': case 'den': case 'deg': case 'e': return kids
+      case 'f': return '<mfrac>' + kids + '</mfrac>'
+      case 'rad': return '<msqrt>' + kids + '</msqrt>'
+      case 'sector': return kids
+      default: return kids
+    }
+  }
+  try {
+    return walk(doc.documentElement)
+  } catch (e) { return '' }
 }
 
 /* ---------------------------------------------------------------- 结构式 */
@@ -661,4 +709,8 @@ code { background: #eef1f6; padding: 1px 5px; border-radius: 4px; }
 .dfoot { display: flex; align-items: center; gap: 10px; }
 .ck { font-size: 12px; color: #475467; display: inline-flex; align-items: center; gap: 5px; }
 .kframe { flex: 1; min-height: 0; width: 100%; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+.mprev {
+  min-height: 40px; padding: 10px 12px; border: 1px solid #e3e8ef; border-radius: 8px;
+  background: #fff; font-size: 20px; overflow-x: auto;
+}
 </style>
