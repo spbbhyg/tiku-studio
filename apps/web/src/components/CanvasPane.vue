@@ -1462,25 +1462,25 @@ import Icon from './Icon.vue'
       <b>{{ title }}</b>
       <span class="muted">{{ blocks.length }} 个元素 · {{ Math.round(pageHeight) }}pt</span>
       <span class="spacer"></span>
-      <label class="chk" v-if="!collapsed && !imageOnly"><input type="checkbox" v-model="autoAlign" /> 自动对齐</label>
-      <span class="muted" v-if="!collapsed && !imageOnly" style="margin-left:8px">字号</span>
-      <input v-if="!collapsed && !imageOnly" v-model.number="fontTarget" type="number" min="6" max="24" step="0.5"
+      <label class="chk" v-if="!collapsed"><input type="checkbox" v-model="autoAlign" /> 自动对齐</label>
+      <span class="muted" v-if="!collapsed" style="margin-left:8px">字号</span>
+      <input v-if="!collapsed" v-model.number="fontTarget" type="number" min="6" max="24" step="0.5"
              style="width:56px;padding:3px 6px" title="统一到多少 pt" />
-      <span class="muted" v-if="!collapsed && !imageOnly" style="margin-left:8px">颜色</span>
-      <span class="swatches" v-if="!collapsed && !imageOnly">
+      <span class="muted" v-if="!collapsed" style="margin-left:8px">颜色</span>
+      <span class="swatches" v-if="!collapsed">
         <button v-for="p in PRESET_COLORS" :key="p.c" class="sw" :class="{ on: textColor === p.c }"
                 :style="{ background: p.c }" :title="`${p.n}：先拖选文字，再点这里直接上色`"
                 @mousedown.prevent="pickColor(p.c)"></button>
       </span>
-      <input v-if="!collapsed && !imageOnly" v-model="textColor" type="color" class="colorin" title="自定义颜色" @change="applyColor" />
-      <button class="ghost sm" v-if="!collapsed && !imageOnly" @click="applyColor" title="给选中的文字块上色；选中图片则把它染成这个颜色；未选中时用于新插入的文字">上色</button>
-      <button class="ghost sm" v-if="!collapsed && !imageOnly" @click="unifyFonts" title="按测得字号统一并左对齐">统一字号</button>
+      <input v-if="!collapsed" v-model="textColor" type="color" class="colorin" title="自定义颜色" @change="applyColor" />
+      <button class="ghost sm" v-if="!collapsed" @click="applyColor" title="给选中的文字块上色；选中图片则把它染成这个颜色；未选中时用于新插入的文字">上色</button>
+      <button class="ghost sm" v-if="!collapsed" @click="unifyFonts" title="按测得字号统一并左对齐">统一字号</button>
       <button class="icon" :title="collapsed ? '展开' : '收起'" @click="collapsed = !collapsed">{{ collapsed ? '▾' : '▴' }}</button>
     </header>
     <div v-if="tip && !collapsed" class="cvhint">{{ tip }}</div>
 
     <div v-show="!collapsed" class="cvbody" @pointerdown="emit('activate')">
-      <div class="toolbar" v-if="!imageOnly">
+      <div class="toolbar">
         <div class="tgroup">
           <span class="lbl">字号</span>
           <button class="icon" title="缩小选中的文字 / 图片" @click="bumpSize(-1)">A－</button>
@@ -1495,7 +1495,7 @@ import Icon from './Icon.vue'
           <button class="icon" :class="{ on: selectedText && selectedText.align === 'right' }" @click="setAlign('right')">⇥</button>
         </div>
         <span class="tdiv"></span>
-        <button class="ghost trbtn" title="翻译选中的字/词/句（DeepSeek）" @click="openTranslate"><Icon name="translate" /><span class="lbl">翻译</span></button>
+        <button v-if="!imageOnly" class="ghost trbtn" title="翻译选中的字/词/句（DeepSeek）" @click="openTranslate"><Icon name="translate" /><span class="lbl">翻译</span></button>
         <button class="ghost" title="把所有文字块的首字左边缘对齐" @click="alignTextAll"><Icon name="align" /></button>
         <button class="ghost" title="把选中的文字统一为当前字号和颜色" @click="unifySelected"><Icon name="unify" /></button>
         <button class="ghost" :disabled="!blocks.some((b) => b.type === 'text')" title="把硬换行连成整段：一段排满再换行" @click="reflowSelected"><Icon name="join" /></button>

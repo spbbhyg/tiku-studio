@@ -12,7 +12,7 @@ SRC = Path(r"C:\Users\Administrator\Documents\tiku-studio\dist-app\神奋-完整
 CANDIDATES = [
     "tiku-studio.exe",
     "chemy/chemy.exe",
-    "chemy/chemy/data/chemy.db",
+    "chemy/chemy/web/index.html",
     "apps/web/dist/index.html",
     "启动-神奋.cmd",
     "使用说明.txt",

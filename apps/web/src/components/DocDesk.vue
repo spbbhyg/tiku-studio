@@ -132,6 +132,19 @@ function onDocDragStart(e) {
   try {
     e.dataTransfer.setData('text/plain', img.src)
     e.dataTransfer.effectAllowed = 'copy'
+    // 拖的时候给个跟着鼠标走的小预览，方便对准落点
+    const dup = document.createElement('div')
+    dup.className = 'dragghost'
+    dup.style.cssText = 'position:fixed;left:-9999px;top:0;border-radius:6px;overflow:hidden;' +
+      'box-shadow:0 6px 18px rgba(0,0,0,.28);background:#fff;padding:2px'
+    const im = document.createElement('img')
+    im.src = img.src
+    const w = Math.min(160, img.naturalWidth || 160)
+    im.style.cssText = 'display:block;width:' + w + 'px;height:auto;opacity:.92'
+    dup.appendChild(im)
+    document.body.appendChild(dup)
+    e.dataTransfer.setDragImage(dup, Math.round(w / 2), 18)
+    setTimeout(() => dup.remove(), 0)
   } catch { /* 忽略 */ }
 }
 

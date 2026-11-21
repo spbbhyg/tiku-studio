@@ -11,7 +11,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, nextTick } from 'vue'
 import katex from 'katex'
 import { api } from '../api'
-import { extractFromFrame } from '../ketcherSvg.js'
+import { extractFromFrame, recolorSvg } from '../ketcherSvg.js'
 
 const emit = defineEmits(['text', 'image'])
 
@@ -66,6 +66,12 @@ async function ksetFromSmiles() {
 }
 /* #11：把选中的末端原子改写成基团标签（Ketcher 原生 alias），而不是贴一个游离文本框 */
 const kAlias = ref('')
+/* #12 上色：Ketcher 模型里原子/键没有颜色字段，所以整块结构染色在导出 SVG 这一层做 */
+const kColor = ref('')
+const KCOLORS = [
+  { c: '', n: '默认黑' }, { c: '#d21f1f', n: '红' }, { c: '#1a5fd0', n: '蓝' },
+  { c: '#1c8c46', n: '绿' }, { c: '#e07b12', n: '橙' }, { c: '#7a4bd0', n: '紫' },
+]
 async function ksetAlias() {
   const v = kAlias.value.trim()
   if (!v) { kMsg.value = '先输入基团缩写，例如 Ac、OAc、NO2'; return }
@@ -78,7 +84,8 @@ async function ktake() {  // 先读整块画布的 SVG：Ketcher 拒绝把带反
   // 只靠 molfile 会让"画了箭头就取不出图"，这正是用户报的 bug。
   const whole = extractFromFrame(kframe.value)
   const r = whole ? { ok: true, molfile: '' } : await kpost({ type: 'ketcher:get' })
-  const svgPayload = (whole && whole.svg) || r.svg || ''
+  let svgPayload = (whole && whole.svg) || r.svg || ''
+  if (svgPayload && kColor.value) svgPayload = recolorSvg(svgPayload, kColor.value)
   if (!svgPayload) { kMsg.value = '画板里还没有结构'; return }
   kMsg.value = '正在生成图…'
   try {
@@ -227,6 +234,12 @@ async function insertStruct() {
           <button class="primary" :disabled="!kReady" @click="ktake">取结构出图并插入</button>
           <span class="muted">{{ kReady ? '画完后点右边那个' : '画板加载中…' }}</span>
         </div>
+        <div class="kbar colors">
+          <span class="muted">结构颜色</span>
+          <button v-for="c in KCOLORS" :key="c.n" class="csw" :class="{ on: kColor === c.c }"
+                  :style="{ background: c.c || '#111' }" :title="c.n" @click="kColor = c.c"></button>
+          <span class="muted" style="margin-left:4px">取图时生效</span>
+        </div>
         <div class="kbar alias">
           <input v-model="kAlias" class="ta alias" placeholder="末端基团缩写，如 Ac / OAc / NO2"
                  @keyup.enter="ksetAlias" />
@@ -282,6 +295,9 @@ async function insertStruct() {
 .err { color: #b91c1c; font-size: 12px; margin-bottom: 6px; }
 .ta.alias { flex: 1 1 140px; min-width: 0; height: 28px; padding: 0 8px; }
 .kbar.alias { display: flex; align-items: center; gap: 6px; }
+.kbar.colors { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.csw { width: 18px; height: 18px; border-radius: 50%; border: 1px solid rgba(0,0,0,.25); cursor: pointer; }
+.csw.on { outline: 2px solid #2f6fed; }
 .kbar.alias button { height: 28px; padding: 0 10px; border-radius: 6px; border: 1px solid #d1d5db; background: #fff; font-size: 12.5px; cursor: pointer; }
 .acts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .acts button { height: 28px; padding: 0 10px; border-radius: 6px; border: 1px solid #d1d5db; background: #fff; font-size: 12.5px; cursor: pointer; }

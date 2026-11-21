@@ -122,3 +122,16 @@ export function sizedSvg(svg, width) {
   return svg.replace(/<svg([^>]*?)\swidth="[^"]*"/i, '<svg$1').replace(/<svg([^>]*?)\sheight="[^"]*"/i, '<svg$1')
     .replace(/^<svg/i, `<svg width="${Math.round(width)}"`)
 }
+
+
+/* 给整块结构染色：Ketcher 的模型里原子/化学键没有颜色字段（颜色来自元素调色板），
+   所以「整块结构变色」在导出 SVG 这一层做——把黑色描边/填充换成目标色。 */
+export function recolorSvg(svg, color) {
+  if (!svg || !color) return svg
+  const c = String(color)
+  return String(svg)
+    .replace(/(stroke\s*=\s*["'])#0{3,6}(["'])/gi, `$1${c}$2`)
+    .replace(/(fill\s*=\s*["'])#0{3,6}(["'])/gi, `$1${c}$2`)
+    .replace(/(stroke\s*=\s*["'])black(["'])/gi, `$1${c}$2`)
+    .replace(/(fill\s*=\s*["'])black(["'])/gi, `$1${c}$2`)
+}

@@ -7,7 +7,7 @@ import { loadShortcuts, matchCombo } from '../shortcuts.js'
 import { flowText } from '../textflow.js'
 import CanvasPane from '../components/CanvasPane.vue'
 import FormulaPad from '../components/FormulaPad.vue'
-import { extractFromFrame } from '../ketcherSvg.js'
+import { extractFromFrame, recolorSvg } from '../ketcherSvg.js'
 import Icon from '../components/Icon.vue'
 import DocDesk from '../components/DocDesk.vue'
 
@@ -81,6 +81,12 @@ function insertSub(i) {
 
 // ---------- Ketcher 手绘板（iframe + postMessage） ----------
 const structTab = ref('smiles')
+const structColor = ref('')
+const structAlias = ref('')
+const STRUCT_COLORS = [
+  { c: '', n: '默认黑' }, { c: '#d21f1f', n: '红' }, { c: '#1a5fd0', n: '蓝' },
+  { c: '#1c8c46', n: '绿' }, { c: '#e07b12', n: '橙' }, { c: '#7a4bd0', n: '紫' },
+]
 const kframe = ref(null)
 const ketcherReady = ref(false)
 let kseq = 0
@@ -120,13 +126,23 @@ async function ketcherSetFromInput() {
   smilesMsg.value = r.ok ? '已载入画板，可继续增删原子' : ('载入失败：' + (r.error || ''))
 }
 
+async function ketcherAlias() {
+  const v = structAlias.value.trim()
+  if (!v) { smilesMsg.value = '先输入基团缩写，例如 Ac、OAc、NO2'; return }
+  const r = await ketcherPost({ type: 'ketcher:alias', alias: v })
+  smilesMsg.value = r && r.ok
+    ? `已把选中原子改写成 ${v}（可以继续成键，导出也不丢）`
+    : ('改写失败：' + ((r && r.error) || '先在画板里点选末端原子'))
+}
+
 async function ketcherTake() {
   // 先整块画布出图：直接读同源 iframe 里的 SVG。箭头/加号/文字不是化学图元，
   // Ketcher 自己也会拒绝把带箭头的结构存成 MOL（"cannot be saved as *.MOL due to reaction arrows"），
   // 所以这里不能等 molfile —— SVG 才是唯一能完整保留画面的东西。
   const whole = extractFromFrame(kframe.value)
   const r = whole ? { ok: true, molfile: '' } : await ketcherPost({ type: 'ketcher:get' })
-  const svgPayload = (whole && whole.svg) || r.svg || ''
+  let svgPayload = (whole && whole.svg) || r.svg || ''
+  if (svgPayload && structColor.value) svgPayload = recolorSvg(svgPayload, structColor.value)
   if (!svgPayload) {
     smilesMsg.value = '画板里还没有结构'
     return
@@ -1669,6 +1685,19 @@ onBeforeUnmount(() => {
               <button class="ghost sm" :disabled="!ketcherReady" @click="ketcherTake">取结构出图</button>
               <span class="muted" v-if="!ketcherReady">画板加载中…</span>
             </div>
+            <div class="kbar scolors">
+              <span class="muted">结构颜色</span>
+              <button v-for="c in STRUCT_COLORS" :key="c.n" class="csw" :class="{ on: structColor === c.c }"
+                      :style="{ background: c.c || '#111' }" :title="c.n" @click="structColor = c.c"></button>
+              <span class="muted">取图时生效</span>
+            </div>
+            <div class="kbar">
+              <input v-model="structAlias" class="ta alias" placeholder="末端基团，如 Ac / OAc / NO2"
+                     @keyup.enter="ketcherAlias" />
+              <button class="ghost sm" :disabled="!ketcherReady"
+                      title="先在画板里点选末端原子，再点这里：它变成可继续成键的原子标签"
+                      @click="ketcherAlias">设为基团标签</button>
+            </div>
             <iframe ref="kframe" class="kframe" src="/ketcher/index.html"
                     @load="ketcherPing" title="结构式画板"></iframe>
           </template>
@@ -2263,6 +2292,10 @@ onBeforeUnmount(() => {
 .stabs button { padding: 4px 10px; font-size: 12.5px; border: 1px solid #dfe5ee; background: #fff; border-radius: 999px; cursor: pointer; color: #475467; }
 .stabs button.on { background: var(--brand, #2563eb); border-color: var(--brand, #2563eb); color: #fff; }
 .kbar { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; flex-wrap: wrap; }
+.scolors { display: flex; align-items: center; gap: 6px; }
+.scolors .csw { width: 18px; height: 18px; border-radius: 50%; border: 1px solid rgba(0,0,0,.25); cursor: pointer; }
+.scolors .csw.on { outline: 2px solid #2f6fed; }
+.ta.alias { flex: 1 1 140px; min-width: 0; height: 28px; padding: 0 8px; }
 .kframe { width: 100%; height: 460px; border: 1px solid var(--line, #e7ebf2); border-radius: 10px; background: #fff; }
 
 /* ---- WPS 式覆盖（放最后，确保优先级） ---- */

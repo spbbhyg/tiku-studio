@@ -146,7 +146,13 @@ function App() {
     }, 400)
     return () => clearInterval(t)
   }, [])
-  return <Editor staticResourcesUrl="" structServiceProvider={provider} onInit={(k) => { ref.current = k }} />
+  return <Editor staticResourcesUrl="" structServiceProvider={provider} onInit={(k) => {
+    ref.current = k
+    try {
+      // 默认不把链末端的碳显示成 CH3（化学写法的习惯），画布也更干净
+      k.setSettings({ hideTerminalLabels: true, atomColoring: true })
+    } catch (e) {}
+  }} />
 }
 
 createRoot(document.getElementById('root')).render(<App />)

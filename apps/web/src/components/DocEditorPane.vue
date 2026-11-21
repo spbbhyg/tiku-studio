@@ -84,6 +84,11 @@
         <div class="dfoot">
           <span class="mut">{{ st.busy ? '正在取图…' : '画完点右边按钮' }}</span>
           <span class="grow" />
+          <span class="crow">颜色
+            <button v-for="c in ['', '#d21f1f', '#1a5fd0', '#1c8c46', '#e07b12', '#7a4bd0']" :key="c || 'k'"
+                    class="csw" :class="{ on: st.color === c }" :style="{ background: c || '#111' }"
+                    @click="st.color = c"></button>
+          </span>
           <button class="btn primary" :disabled="st.busy" @click="takeStruct">取结构并插入</button>
         </div>
       </div>
@@ -95,7 +100,7 @@
 import { onBeforeUnmount, onMounted, reactive, ref, shallowRef } from 'vue'
 import { api } from '../api.js'
 import { renderMath } from '../math.js'
-import { extractFromFrame } from '../ketcherSvg.js'
+import { extractFromFrame, recolorSvg } from '../ketcherSvg.js'
 import 'superdoc/style.css'
 
 const files = ref([])
@@ -113,7 +118,7 @@ const sd = shallowRef(null)
 
 const fx = reactive({
   omml: '', mathml: '', text: '', startOnly: false, open: false, tex: '', display: false, url: '', data: '', w: 0, h: 0, busy: false })
-const st = reactive({ open: false, busy: false })
+const st = reactive({ open: false, busy: false, color: '' })
 const stFrame = ref(null)
 
 const fxChips = [
@@ -507,7 +512,8 @@ async function takeStruct() {
     const fr = stFrame.value
     const whole = fr ? extractFromFrame(fr) : null
     if (!whole || !whole.svg) throw new Error('画板里还没有结构，先画一个再取')
-    const r = await api.post('/api/doce/structure', { svg: whole.svg })
+    const svg = st.color ? recolorSvg(whole.svg, st.color) : whole.svg
+    const r = await api.post('/api/doce/structure', { svg })
     const ok = await insertPng(r.data, r.width, r.height, '结构式')
     if (ok) { st.open = false; say('结构式已插到光标处') }
   } catch (e) { fail(e) } finally { st.busy = false }
@@ -708,6 +714,9 @@ code { background: #eef1f6; padding: 1px 5px; border-radius: 4px; }
 .prev img { max-width: 100%; max-height: 180px; }
 .dfoot { display: flex; align-items: center; gap: 10px; }
 .ck { font-size: 12px; color: #475467; display: inline-flex; align-items: center; gap: 5px; }
+.crow { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: #667085; }
+.csw { width: 16px; height: 16px; border-radius: 50%; border: 1px solid rgba(0,0,0,.25); cursor: pointer; }
+.csw.on { outline: 2px solid #2f6fed; }
 .kframe { flex: 1; min-height: 0; width: 100%; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
 .mprev {
   min-height: 40px; padding: 10px 12px; border: 1px solid #e3e8ef; border-radius: 8px;

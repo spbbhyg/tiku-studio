@@ -105,7 +105,7 @@ reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\神奋" /v Uni
 reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\神奋" /v Publisher /t REG_SZ /d "神奋" /f >nul
 """
 
-README = """神奋  题库 · 对纲 · 组卷（0.6.2 · 第五版）
+README = """神奋  题库 · 对纲 · 组卷（0.6.3 · 第六版）
 =====================================
 
 怎么用
@@ -211,9 +211,13 @@ def build_tree() -> Path:
             shutil.copy2(src, bank_dir / name)
         else:
             raise SystemExit(f"题库里找不到 {src}")
-    # 题库自己的数据与网页（data/chemy.db 里有题，web/ 是它的界面）
+    # 题库自己的网页与代码（web/ 是它的界面，app.py 等是它的源码层）
+    # 注意：**题库的数据一律不带**（chemy/data 里是老师自己的题库、笔记、上传的图），
+    # 安装包必须是一份"空题库"，第一次启动自己建库，否则会把私人题目发给所有人。
     copytree(BANK / "chemy", bank_dir / "chemy",
-             skip={"__pycache__", "cache", "build", "tmp", "samples"})
+             skip={"__pycache__", "cache", "build", "tmp", "samples", "data"})
+    if (bank_dir / "chemy" / "data").exists():
+        shutil.rmtree(bank_dir / "chemy" / "data")
 
     step("写启动脚本与说明")
     (OUT / "启动-神奋.cmd").write_text(START_CMD, encoding="utf-8")
@@ -221,7 +225,7 @@ def build_tree() -> Path:
     try:
         from ..apps.api.app.config import VERSION as _V  # type: ignore  # noqa: F401
     except Exception:  # noqa: BLE001
-        _V = "0.6.2"
+        _V = "0.6.3"
     (OUT / "写注册表.cmd").write_text(
         REG_CMD.replace("{ver}", str(_V)).replace("{dir}", str(OUT)), encoding="utf-8")
     (OUT / "使用说明.txt").write_text(README, encoding="utf-8")
