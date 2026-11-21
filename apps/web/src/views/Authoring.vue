@@ -1906,7 +1906,7 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="wbody dmode" v-show="editMode === 'doc'">
-      <DocDesk />
+      <DocDesk :mode="editMode" @mode="switchMode($event)" />
     </div>
 
     <div v-if="pop.open" class="textpop" :style="{ left: pop.x + 'px', top: pop.y + 'px' }"

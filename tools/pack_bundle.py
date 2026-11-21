@@ -105,7 +105,7 @@ reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\神奋" /v Uni
 reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\神奋" /v Publisher /t REG_SZ /d "神奋" /f >nul
 """
 
-README = """神奋  题库 · 对纲 · 组卷（0.6.3 · 第六版）
+README = """神奋  题库 · 对纲 · 组卷（0.6.4 · 第七版）
 =====================================
 
 怎么用
@@ -225,7 +225,7 @@ def build_tree() -> Path:
     try:
         from ..apps.api.app.config import VERSION as _V  # type: ignore  # noqa: F401
     except Exception:  # noqa: BLE001
-        _V = "0.6.3"
+        _V = "0.6.4"
     (OUT / "写注册表.cmd").write_text(
         REG_CMD.replace("{ver}", str(_V)).replace("{dir}", str(OUT)), encoding="utf-8")
     (OUT / "使用说明.txt").write_text(README, encoding="utf-8")

@@ -5,6 +5,8 @@ import DocEditorPane from './DocEditorPane.vue'
 import CanvasPane from './CanvasPane.vue'
 import { importPdfToCanvas, isCanvasImage, isCanvasPdf, uploadImageToCanvas } from '../canvasImport.js'
 
+const props = defineProps({ mode: { type: String, default: 'doc' } })
+const emit2 = defineEmits(['mode'])
 const docRef = ref(null)
 const paneRef = ref(null)
 const canvasFileEl = ref(null)
@@ -227,6 +229,10 @@ async function aiInsert() {
         {{ rf ? '显示画布' : '收起画布' }}
       </button>
       <span class="sp" />
+      <div class="modesw" title="在「文档排版」和「自由画布」之间切换">
+        <button :class="{ on: props.mode === 'doc' }" @click="emit2('mode', 'doc')">文档</button>
+        <button :class="{ on: props.mode === 'canvas' }" @click="emit2('mode', 'canvas')">画布</button>
+      </div>
       <span v-if="dirty && saving" class="mut">正在自动保存…</span>
       <span v-else-if="savedAt" class="mut">已自动保存 {{ savedAt }}</span>
       <span v-else class="mut">改完自动保存，不用点保存</span>
@@ -282,7 +288,10 @@ async function aiInsert() {
 .dtop { display: flex; align-items: center; gap: 8px; padding: 6px 2px 8px; flex-wrap: wrap; }
 .dtop .sp { flex: 1; }
 .dtop .mut { font-size: 12px; color: #98a2b3; }
-.dtop .dmsg { font-size: 12px; color: #1c8c46; background: #f2fbf5; border: 1px solid #cdebd8;
+.dtop .modesw { display: inline-flex; border: 1px solid #d1d5db; border-radius: 8px; overflow: hidden; margin-right: 8px; }
+.modesw button { border: 0; background: #fff; color: #4b5563; font-size: 12.5px; padding: 4px 12px; cursor: pointer; }
+.modesw button.on { background: #2563eb; color: #fff; }
+.dmsg { font-size: 12px; color: #1c8c46; background: #f2fbf5; border: 1px solid #cdebd8;
   border-radius: 999px; padding: 2px 10px; }
 .dbody { display: flex; align-items: stretch; gap: 0; flex: 1; min-height: 0;
   width: 100%; overflow: hidden; }

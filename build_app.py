@@ -22,16 +22,16 @@ def run(cmd: list[str]) -> None:
 
 
 def main() -> int:
-    pyi = ROOT / ".venv" / "Scripts" / "pyinstaller.exe"
-    if not pyi.exists():
-        pyi = Path(sys.executable).parent / "pyinstaller.exe"
+    # 用 python -m PyInstaller：搬盘/杀软之后 .venv\Scripts\pyinstaller.exe 这个
+    # shim 可能失效（实测会静默 exit 1、无任何输出），走模块入口更稳。
+    pyi = [sys.executable, "-m", "PyInstaller"]
 
     if (ROOT / "build").exists():
         shutil.rmtree(ROOT / "build", ignore_errors=True)
     if (ROOT / "dist").exists():
         shutil.rmtree(ROOT / "dist", ignore_errors=True)
 
-    run([str(pyi), "tiku-studio.spec", "--noconfirm", "--clean"])
+    run([*pyi, "tiku-studio.spec", "--noconfirm", "--clean"])
 
     src = ROOT / "dist" / "tiku-studio"
     if OUT.exists():

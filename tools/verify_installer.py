@@ -8,7 +8,8 @@ import zipfile
 from pathlib import Path
 
 MARK = b"__SHENFEN_PAYLOAD_V1__"
-SRC = Path(r"C:\Users\Administrator\Documents\tiku-studio\dist-app\神奋-完整版")
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "dist-app" / "神奋-完整版"
 CANDIDATES = [
     "tiku-studio.exe",
     "chemy/chemy.exe",
