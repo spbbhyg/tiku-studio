@@ -80,9 +80,13 @@
           <span class="grow" />
           <button class="btn ghost" @click="st.open = false">关闭</button>
         </div>
-        <iframe ref="stFrame" class="kframe" src="/ketcher/index.html" />
+        <iframe ref="stFrame" class="kframe" :src="ketchSrc" @load="onBoardLoad" />
+        <div v-if="st.err" class="kerr">
+          <span>{{ st.err }}</span>
+          <button class="btn sm" @click="reloadBoard">重新加载画板</button>
+        </div>
         <div class="dfoot">
-          <span class="mut">{{ st.busy ? '正在取图…' : '画完点右边按钮' }}</span>
+          <span class="mut">{{ st.busy ? '正在取图…' : (st.ready ? '画完点右边按钮' : (st.note || '画板加载中…')) }}</span>
           <span class="grow" />
           <span class="crow">颜色
             <button v-for="c in ['', '#d21f1f', '#1a5fd0', '#1c8c46', '#e07b12', '#7a4bd0']" :key="c || 'k'"
@@ -97,7 +101,7 @@
 </template>
 
 <script setup>
-import { onBeforeUnmount, onMounted, reactive, ref, shallowRef } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef } from 'vue'
 import { api } from '../api.js'
 import { renderMath } from '../math.js'
 import { extractFromFrame, recolorSvg } from '../ketcherSvg.js'
@@ -118,8 +122,68 @@ const sd = shallowRef(null)
 
 const fx = reactive({
   omml: '', mathml: '', text: '', startOnly: false, open: false, tex: '', display: false, url: '', data: '', w: 0, h: 0, busy: false })
-const st = reactive({ open: false, busy: false, color: '' })
+const st = reactive({ open: false, busy: false, color: '', ready: false, note: '', err: '', retry: 0 })
 const stFrame = ref(null)
+const ketchSrc = computed(() => `/ketcher/index.html?r=${st.retry}`)
+
+/* ---------------------------------------------------------------- 画板通信 */
+// 和 ChemDock 用同一套协议：ping 探活，get 拿整块 SVG（含箭头、加号、文字标注）。
+let kseq = 0
+const kpending = new Map()
+function kpost(payload, timeout = 20000) {
+  const win = stFrame.value && stFrame.value.contentWindow
+  if (!win) return Promise.reject(new Error('画板还没加载出来'))
+  const id = 'd' + (++kseq)
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      kpending.delete(id)
+      reject(new Error('画板没响应'))
+    }, timeout)
+    kpending.set(id, { resolve, reject, timer })
+    win.postMessage({ ...payload, id }, '*')
+  })
+}
+function onKetcherMsg(e) {
+  const d = e.data
+  if (!d || d.type !== 'ketcher:result' || !d.id) return
+  const p = kpending.get(String(d.id))
+  if (!p) return
+  kpending.delete(String(d.id))
+  clearTimeout(p.timer)
+  if (d.ok) p.resolve(d)
+  else p.reject(new Error(d.error || '画板返回失败'))
+}
+onMounted(() => window.addEventListener('message', onKetcherMsg))
+onBeforeUnmount(() => {
+  window.removeEventListener('message', onKetcherMsg)
+  for (const p of kpending.values()) clearTimeout(p.timer)
+  kpending.clear()
+})
+
+async function pingBoard(tries = 10) {
+  st.ready = false
+  for (let i = 0; i < tries; i++) {
+    if (!st.open) return
+    try {
+      const r = await kpost({ type: 'ketcher:ping' }, 3000)
+      if (r && r.ok) { st.ready = true; st.note = ''; st.err = ''; return }
+    } catch (e) { /* 还没起来，接着等 */ }
+    await new Promise((res) => setTimeout(res, i === 0 ? 500 : 1200))
+  }
+  st.note = ''
+  st.err = '画板没有加载出来（后台可能刚重启过）。点「重新加载画板」再试，或者关掉弹窗重新打开。'
+}
+function onBoardLoad() {
+  if (!st.open) return
+  // 重新加载后 onload 会再来一次，这里等一下再探活
+  setTimeout(() => { if (st.open) pingBoard(st.ready ? 1 : 10) }, 300)
+}
+function reloadBoard() {
+  st.err = ''
+  st.ready = false
+  st.note = '画板加载中…'
+  st.retry += 1
+}
 
 const fxChips = [
   { t: '\\ce{…}', ins: '\\ce{}', back: 1 },
@@ -504,19 +568,46 @@ function ommlToMathml(omml) {
 /* ---------------------------------------------------------------- 结构式 */
 function openStruct() {
   st.open = true
+  st.err = ''
+  st.note = '画板加载中…'
+  st.ready = false
+  nextTick(() => pingBoard(10))
+}
+
+// ketcher:get 在空画板里也会回一个 4×4 的空 SVG，别当成结构插进文档
+function svgHasDrawing(svg) {
+  if (!svg) return false
+  const body = String(svg)
+    .replace(/<\?xml[^>]*\?>/g, '')
+    .replace(/<svg[^>]*>/i, '')
+    .replace(/<\/svg>\s*$/i, '')
+  return /<(path|line|polyline|polygon|circle|ellipse|rect|text|use)\b/i.test(body)
 }
 
 async function takeStruct() {
   st.busy = true
+  st.err = ''
   try {
+    if (!st.ready) {
+      await pingBoard(3)
+      if (!st.ready) throw new Error('画板还在加载，等一两秒再点一次；一直不行就点「重新加载画板」')
+    }
     const fr = stFrame.value
     const whole = fr ? extractFromFrame(fr) : null
-    if (!whole || !whole.svg) throw new Error('画板里还没有结构，先画一个再取')
-    const svg = st.color ? recolorSvg(whole.svg, st.color) : whole.svg
-    const r = await api.post('/api/doce/structure', { svg })
-    const ok = await insertPng(r.data, r.width, r.height, '结构式')
+    let svg = whole && whole.svg ? whole.svg : ''
+    // extractFromFrame 认不出反应箭头等画法时，退回 iframe 里的 ketcher:get（和 ChemDock 一样）
+    if (!svg) {
+      const r = await kpost({ type: 'ketcher:get' }, 8000).catch(() => null)
+      if (r && r.svg && !r.empty && svgHasDrawing(r.svg)) svg = r.svg
+    }
+    if (!svg) throw new Error('画板里还没有结构，先画一个再取')
+    const svg2 = st.color ? recolorSvg(svg, st.color) : svg
+    const r2 = await api.post('/api/doce/structure', { svg: svg2 })
+    const ok = await insertPng(r2.data, r2.width, r2.height, '结构式')
     if (ok) { st.open = false; say('结构式已插到光标处') }
-  } catch (e) { fail(e) } finally { st.busy = false }
+  } catch (e) {
+    st.err = (e && e.message) || '取结构失败，再试一次'
+  } finally { st.busy = false }
 }
 
 /* ---------------------------------------------------------------- 插图 */
@@ -584,10 +675,21 @@ async function insertFile(f) {
   } catch (e) { fail(e) }
 }
 
+async function waitDocApi(ms = 6000) {
+  const t0 = Date.now()
+  for (;;) {
+    const ed = sd.value && sd.value.activeEditor
+    const d = ed && ed.doc
+    if (d && d.create && d.create.image) return d
+    if (Date.now() - t0 > ms) return null
+    await new Promise((r) => setTimeout(r, 200))
+  }
+}
+
 async function insertPng(dataUrl, wPt, hPt, alt) {
-  const ed = sd.value && sd.value.activeEditor
-  const doc = ed && ed.doc
-  if (!doc || !doc.create || !doc.create.image) { fail('编辑器还没准备好，等文档显示出来再插'); return false }
+  // 文档引擎刚打开时 activeEditor 会晚一点才出现，这里等一等，别让用户白点
+  const doc = await waitDocApi(6000)
+  if (!doc) { fail('编辑器还没准备好，等文档显示出来再插'); return false }
   const w = Math.min(Number(wPt) || 120, 430)
   const ratio = Number(hPt) && Number(wPt) ? Number(hPt) / Number(wPt) : 1
   try {
@@ -717,6 +819,8 @@ code { background: #eef1f6; padding: 1px 5px; border-radius: 4px; }
 .crow { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: #667085; }
 .csw { width: 16px; height: 16px; border-radius: 50%; border: 1px solid rgba(0,0,0,.25); cursor: pointer; }
 .csw.on { outline: 2px solid #2f6fed; }
+.kerr { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 6px 0 0; padding: 6px 10px;
+  border-radius: 8px; font-size: 12.5px; color: #b42318; background: #fff5f4; border: 1px solid #ffd5cf; }
 .kframe { flex: 1; min-height: 0; width: 100%; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
 .mprev {
   min-height: 40px; padding: 10px 12px; border: 1px solid #e3e8ef; border-radius: 8px;

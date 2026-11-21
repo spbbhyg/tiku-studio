@@ -238,6 +238,7 @@ function switchMode(m) {
   if (dirty && !confirm('切换模式会丢掉画布上没保存的改动，确定切换？')) return
   editMode.value = m
   canvasDirty.value = false
+  if (m === 'doc') syncDocFromQ()
   localStorage.setItem('tiku-author-mode', m)
   const q = { ...route.query }
   if (m === 'canvas') q.mode = 'canvas'; else delete q.mode
@@ -261,6 +262,18 @@ const pageImg = ref(null)
 // ── AI 拆题：试卷 + 答案 → 结构化预览 ───────────────────────────────
 const qPane = ref(null)
 const aPane = ref(null)
+// 文档模式右侧画布和「题目画布」共用一份排版：
+// 进文档模式 / 载入草稿时把题目画布推过去，文档画布上改完再回写题目画布 + 存草稿。
+const docCanvasLayout = ref(null)
+function syncDocFromQ() {
+  if (qPane.value) docCanvasLayout.value = qPane.value.getLayout()
+}
+function onDocCanvasLayout(lay) {
+  if (!lay) return
+  docCanvasLayout.value = lay
+  if (qPane.value) qPane.value.setLayout(lay)
+  scheduleDraft()
+}
 const activePane = ref('q')
 const qOpen = ref(false)
 const mode = ref('crop')            // crop = 框选裁剪；text = 选择文字 / 翻译
@@ -1366,6 +1379,7 @@ async function loadDraftById(id) {
   const pl = d.payload || {}
   if (pl.q_layout && qPane.value) qPane.value.setLayout(pl.q_layout)
   if (pl.a_layout && aPane.value) aPane.value.setLayout(pl.a_layout)
+  syncDocFromQ()
   const f = pl.form || {}
   form.author = f.author || form.author
   form.topic = f.topic || form.topic
@@ -1906,7 +1920,7 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="wbody dmode" v-show="editMode === 'doc'">
-      <DocDesk :mode="editMode" @mode="switchMode($event)" />
+      <DocDesk :mode="editMode" :layout="docCanvasLayout" @layout="onDocCanvasLayout" @mode="switchMode($event)" />
     </div>
 
     <div v-if="pop.open" class="textpop" :style="{ left: pop.x + 'px', top: pop.y + 'px' }"

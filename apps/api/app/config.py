@@ -59,7 +59,7 @@ def _resolve_data_dir() -> Path:
 DATA_DIR = _resolve_data_dir()
 
 # 二期版本号：软件更新用它跟 GitHub 上的 tag 比
-VERSION = "0.6.4"
+VERSION = "0.6.5"
 DB_PATH = Path(os.environ.get("TIKU_DB_PATH", DATA_DIR / "tiku.db"))
 LIBRARY_DIR = DATA_DIR / "library"                   # 原件与题目图存放处（私有）
 INBOX_DIR = DATA_DIR / "inbox"                       # Agent 拆解产物投递处

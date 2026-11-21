@@ -5,8 +5,12 @@ import DocEditorPane from './DocEditorPane.vue'
 import CanvasPane from './CanvasPane.vue'
 import { importPdfToCanvas, isCanvasImage, isCanvasPdf, uploadImageToCanvas } from '../canvasImport.js'
 
-const props = defineProps({ mode: { type: String, default: 'doc' } })
-const emit2 = defineEmits(['mode'])
+const props = defineProps({
+  mode: { type: String, default: 'doc' },
+  // 和出题页「题目画布」共用的排版数据：由 Authoring 传入，这边改完再回传
+  layout: { type: Object, default: null },
+})
+const emit2 = defineEmits(['mode', 'layout'])
 const docRef = ref(null)
 const paneRef = ref(null)
 const canvasFileEl = ref(null)
@@ -55,6 +59,26 @@ function toggleCanvas() {
 const docStyle = computed(() => (rf.value
   ? { flex: '1 1 auto' }
   : { flex: `0 0 ${(ratio.value * 100).toFixed(2)}%` }))
+
+// ---------- 画布同步：和出题页「题目画布」共用同一份排版数据 ----------
+// 父组件（出题页）把题目画布的 layout 传进来，这边画布上改完再回传。
+// lastEmit 记住「本组件刚发出去的那一份」，父组件原样传回来时不再重建，避免来回覆盖。
+const lastEmit = ref(null)
+function applyLayout(l) {
+  if (!l || !paneRef.value) return
+  try { paneRef.value.setLayout(l) } catch (e) { /* 旧格式不兼容时保留原画布 */ }
+}
+watch(() => props.layout, (v) => {
+  if (!v || v === lastEmit.value) return
+  nextTick(() => applyLayout(v))
+})
+onMounted(() => { nextTick(() => applyLayout(props.layout)) })
+function onCanvasChanged() {
+  if (!paneRef.value) return
+  const lay = paneRef.value.getLayout()
+  lastEmit.value = lay
+  emit2('layout', lay)
+}
 
 // ---------- 文档 ----------
 const curName = ref('')
@@ -276,7 +300,7 @@ async function aiInsert() {
       <section v-show="!rf" class="rpane">
         <CanvasPane ref="paneRef" title="画布" :max-pages="1" to-doc image-only
                     hint="把图拖进来，或点「＋ 文本」；选中图可裁剪、可送进左边文档"
-                    @toDoc="onToDoc" @files="onCanvasFiles" @changed="() => {}" />
+                    @toDoc="onToDoc" @files="onCanvasFiles" @changed="onCanvasChanged" />
       </section>
     </div>
   </div>

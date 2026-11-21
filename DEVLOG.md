@@ -312,3 +312,18 @@ B 的源码包（`tiku-studio-dev-2026-11-04.zip`）**已包含 A 的全部文�
 2. **题库勾选入口丢失**：删「选入练习卷」后没有选题方式，底部「生成练习卷」条永远出不来。目录每题加复选框 + 目录头「全选 / 取消全选 / 清空」。
 3. **试卷详情「题目+答案合卷」不记导出日志**：原本是 `<a target=_blank>` 直开，改成 `openView('all')`，与另两卷一致写入 `export_logs`。
 4. **普通试卷没有 PDF 下载**：新增「下载 PDF」按钮（`GET /api/papers/{id}/export`），并记录导出版本指纹。
+
+---
+
+## 十、2026-11-21 更新（0.6.5）
+
+1. **文档模式右侧画布与出题页「题目画布」同步**：`DocDesk.vue` 增加 `layout` 双向绑定（`props.layout` / `emit('layout')`，`lastEmit` 防回声），`Authoring.vue` 以 `docCanvasLayout` 做中转，切到文档模式、恢复草稿时把 `qPane.getLayout()` 推给文档画布，文档画布上的增删改实时写回题目画布并触发草稿自动保存。
+2. **文档「结构式」弹窗加载状态可见**：`DocEditorPane.vue` 增加 ketcher 桥（postMessage `ketcher:ping` / `ketcher:get`，`ketcher:result` 监听，20s 超时）、「画板加载中…/画完点右边按钮/没有加载出来」状态、`重新加载画板`（带 `?r=` 缓存参数重载 iframe）。此前 iframe 连不上时只显示浏览器错误页，页面上没有任何提示。
+3. **结构式插入可靠性**：
+   - `extractFromFrame` 取不到时回退 `ketcher:get`（反应箭头等画法也能整块取 SVG）；
+   - 空画板（Ketcher 返回 4×4 空 SVG 且 `empty:false`）用 `svgHasDrawing()` 拦下，提示「画板里还没有结构，先画一个再取」并保持弹窗打开；
+   - 文档引擎 `doc.create.image` 未就绪时最多等 6 秒再插，错误显示在弹窗内部（原来错误条被弹窗盖住）。
+
+验证（本机 Edge + Playwright，安装版实测）：文档画布恢复草稿 1 个元素；画布上拖入图片，文档模式同步显示 2 个元素；画布模式加的图切到文档模式显示 3 个元素；空画板取结构提示正确且不关窗；Ketcher 画苯环 → 「取结构并插入」→ 文档出现结构图，自动保存的 docx 内 `word/media/image1.png` 存在。
+
+版本号 `apps/api/app/config.py` 同步改为 0.6.5；发布包（pack.py 构建的 win64 zip）尚未打包，GitHub Release 资产待补。
